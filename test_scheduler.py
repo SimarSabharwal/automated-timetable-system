@@ -464,6 +464,132 @@ def run_tests():
         assert exported["count"] > 0
         assert any(e["room_code"] == "201" and e["reason"] == "ERP External API Allotment" for e in exported["timetable"])
 
+        # 11. Primary Room Rules, Dedicated Rooms, and Cohesive Multi-Course Generation
+        # 11a. Primary Room must be a CLASSROOM (cannot be Computer Lab or Auditorium)
+        lab_104 = rooms["104"]
+        res_bad_primary = client.post(
+            f"/api/v1/sections/{bca_m1['id']}/primary-room",
+            json={"room_id": lab_104["id"]},
+        )
+        assert res_bad_primary.status_code == 400
+        assert "Only standard CLASSROOMs can be assigned as a Primary Class" in res_bad_primary.get_json()["error"]
+
+        res_good_primary = client.post(
+            f"/api/v1/sections/{bca_m1['id']}/primary-room",
+            json={"room_id": g01["id"]},
+        )
+        assert res_good_primary.status_code == 200
+        assert res_good_primary.get_json()["primary_room_id"] == g01["id"]
+
+        # Shift conflict: another Morning section cannot claim G01
+        res_conflict_primary = client.post(
+            f"/api/v1/sections/{bba_m1['id']}/primary-room",
+            json={"room_id": g01["id"]},
+        )
+        assert res_conflict_primary.status_code == 400
+        assert "already assigned as the Primary Class" in res_conflict_primary.get_json()["error"]
+
+        # 11b. Dedicated Room Rules in Manual Allotment
+        # Theory subject into Computer Lab MUST FAIL
+        bca_theory_sub = next(s for s in boot["subjects"] if s["course_code"] == "BCA" and s["year_number"] == 1 and not s["requires_lab"])
+        theory_in_lab = client.post(
+            "/api/v1/timetable/manual",
+            json={
+                "section_id": bca_m1["id"],
+                "day_of_week": "Friday",
+                "slot_index": 3,
+                "subject_id": bca_theory_sub["id"],
+                "faculty_id": bca_theory_sub["faculty_id"],
+                "room_id": lab_104["id"],
+                "validity_type": "LIFETIME",
+                "reason": "Test theory in lab rejection",
+            },
+        )
+        assert theory_in_lab.status_code == 409
+        assert any("theory subject and must be assigned to a standard CLASSROOM" in c for c in theory_in_lab.get_json()["conflicts"])
+
+        # Lab subject into Classroom MUST FAIL
+        bba_lab_sub = next(s for s in boot["subjects"] if s["subject_code"] == "LAB-IT")
+        lab_in_classroom = client.post(
+            "/api/v1/timetable/manual",
+            json={
+                "section_id": bba_m1["id"],
+                "day_of_week": "Friday",
+                "slot_index": 3,
+                "subject_id": bba_lab_sub["id"],
+                "faculty_id": bba_lab_sub["faculty_id"],
+                "room_id": g01["id"],
+                "validity_type": "LIFETIME",
+                "reason": "Test lab in classroom rejection",
+            },
+        )
+        assert lab_in_classroom.status_code == 409
+        assert any("requires a dedicated COMPUTER_LAB" in c for c in lab_in_classroom.get_json()["conflicts"])
+
+        # Lab subject into Computer Lab MUST SUCCEED
+        lab_in_lab = client.post(
+            "/api/v1/timetable/manual",
+            json={
+                "section_id": bba_m1["id"],
+                "day_of_week": "Friday",
+                "slot_index": 3,
+                "subject_id": bba_lab_sub["id"],
+                "faculty_id": bba_lab_sub["faculty_id"],
+                "room_id": lab_104["id"],
+                "validity_type": "LIFETIME",
+                "reason": "Test valid lab allotment",
+            },
+        )
+        assert lab_in_lab.status_code == 201, lab_in_lab.get_json()
+
+        # 11c. Cohesive Multi-Course Generation across ALL courses at the same time
+        all_auto_res = client.post(
+            "/api/v1/timetable/automate",
+            json={
+                "scope": "all",
+                "weekdays": ["Monday", "Tuesday", "Wednesday"],
+                "overwrite_auto": True,
+            },
+        )
+        assert all_auto_res.status_code == 200, all_auto_res.get_json()
+        assert all_auto_res.get_json()["created_count"] > 100
+
+        all_tt = client.get("/api/v1/timetable").get_json()["entries"]
+        # Verify room dedication invariants across entire schedule
+        for entry in all_tt:
+            if entry["allocation_category"] == "COURSE":
+                if entry["requires_lab"]:
+                    assert entry["room_type"] == "COMPUTER_LAB", f"Lab subject {entry['subject_name']} assigned to non-lab room {entry['room_code']}"
+                else:
+                    assert entry["room_type"] == "CLASSROOM", f"Theory subject {entry['subject_name']} assigned to non-classroom {entry['room_code']}"
+
+        # Verify zero room double-booking (only overlapping date ranges are conflicts)
+        for i, e1 in enumerate(all_tt):
+            for j, e2 in enumerate(all_tt):
+                if i >= j or e1["room_id"] != e2["room_id"] or e1["day_of_week"] != e2["day_of_week"]:
+                    continue
+                # Time slot collision
+                if e1["start_time"] < e2["end_time"] and e2["start_time"] < e1["end_time"]:
+                    date_overlap = (
+                        e1["validity_type"] == "LIFETIME"
+                        or e2["validity_type"] == "LIFETIME"
+                        or (e1["effective_from"] <= e2["effective_to"] and e2["effective_from"] <= e1["effective_to"])
+                    )
+                    assert not date_overlap, f"Room {e1['room_code']} double booked on {e1['day_of_week']} ({e1['start_time']}–{e1['end_time']}) between {e1['validity_type']} and {e2['validity_type']}"
+
+        # Verify zero teacher double-booking
+        for i, e1 in enumerate(all_tt):
+            for j, e2 in enumerate(all_tt):
+                if i >= j or not e1["faculty_id"] or e1["faculty_id"] != e2["faculty_id"] or e1["day_of_week"] != e2["day_of_week"]:
+                    continue
+                if e1["start_time"] < e2["end_time"] and e2["start_time"] < e1["end_time"]:
+                    date_overlap = (
+                        e1["validity_type"] == "LIFETIME"
+                        or e2["validity_type"] == "LIFETIME"
+                        or (e1["effective_from"] <= e2["effective_to"] and e2["effective_from"] <= e1["effective_to"])
+                    )
+                    assert not date_overlap, f"Faculty {e1['faculty_id']} double booked on {e1['day_of_week']} ({e1['start_time']}–{e1['end_time']})"
+
         print("ALL STUDENT SYSTEM CLAUSES & LIFETIME/DATED TESTS PASSED!")
 
 

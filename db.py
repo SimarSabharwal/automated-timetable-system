@@ -288,6 +288,7 @@ def seed_initial_data(conn: sqlite3.Connection) -> None:
             (course_map["BBA"], 1, "34139", "Business Mathematics", 0, 4, fac_map["NPN"]),
             (course_map["BBA"], 1, "34140", "Micro Economics", 0, 2, fac_map["PM"]),
             (course_map["BBA"], 1, "34142", "Environmental Studies", 0, 2, fac_map["AKR"]),
+            (course_map["BBA"], 1, "LAB-IT", "Computer Applications in Business Lab", 1, 2, fac_map["YK"]),
             (course_map["BBA"], 2, "BBA-201", "Organizational Behaviour", 0, 4, fac_map["AK"]),
             (course_map["BBA"], 2, "BBA-202", "Marketing Management", 0, 4, fac_map["PM"]),
             (course_map["BBA"], 2, "BBA-203", "Cost & Management Accounting", 0, 4, fac_map["RKS"]),
@@ -395,4 +396,98 @@ def seed_initial_data(conn: sqlite3.Connection) -> None:
             students_to_insert,
         )
 
+    # Ensure LAB-IT subject exists for BBA Year 1
+    bba_row = conn.execute("SELECT id FROM courses WHERE code = 'BBA'").fetchone()
+    if bba_row:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO subjects (course_id, year_number, subject_code, subject_name, requires_lab, lectures_per_week, faculty_id)
+            SELECT ?, 1, 'LAB-IT', 'Computer Applications in Business Lab', 1, 2, f.id
+            FROM faculty f WHERE f.faculty_code = 'YK'
+            """,
+            (bba_row["id"],),
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO teacher_subjects (faculty_id, subject_id)
+            SELECT f.id, s.id
+            FROM faculty f, subjects s
+            WHERE f.faculty_code IN ('YK', 'MGS', 'MAG') AND s.subject_code = 'LAB-IT'
+            """
+        )
+
+    assign_default_primary_rooms(conn)
+
     conn.commit()
+
+
+def assign_default_primary_rooms(conn: sqlite3.Connection):
+    """
+    Ensure every section has a non-conflicting, dedicated standard CLASSROOM as its primary home room.
+    Labs (G04, 104, 107) and event halls (Amphitheater, Auditorium) are strictly excluded.
+    """
+    classrooms = conn.execute(
+        "SELECT id, room_code FROM rooms WHERE room_type = 'CLASSROOM' AND status = 'ACTIVE' ORDER BY room_code"
+    ).fetchall()
+    room_map = {r["room_code"]: r["id"] for r in classrooms}
+
+    primary_code_map = {
+        ("BCA", 1, "Grade-Wise"): "G01",
+        ("BCA", 2, "Grade-Wise"): "G02",
+        ("BCA", 3, "Grade-Wise"): "G03",
+        ("BBA", 1, "M1"): "101",
+        ("BBA", 1, "M2"): "102",
+        ("BBA", 1, "M3"): "103",
+        ("BBA", 2, "M1"): "105",
+        ("BBA", 2, "M2"): "106",
+        ("BBA", 2, "M3"): "108",
+        ("BBA", 3, "M1"): "201",
+        ("BBA", 3, "M2"): "202",
+        ("BBA", 3, "M3"): "203",
+        ("MBA", 1, "M1"): "204",
+        ("MBA", 1, "M2"): "205",
+        ("LLB", 1, "M1"): "206",
+        ("LLB", 1, "M2"): "207",
+        ("LLB", 2, "M1"): "208",
+        ("LLB", 2, "M2"): "301",
+        ("LLB", 3, "M1"): "302",
+        ("LLB", 3, "M2"): "303",
+        ("LLB", 4, "M1"): "304",
+        ("LLB", 4, "M2"): "305",
+        ("LLB", 5, "M1"): "306",
+        ("LLB", 5, "M2"): "307",
+        ("BBA", 1, "A1"): "101",
+        ("BBA", 1, "A2"): "102",
+        ("BBA", 1, "A3"): "103",
+        ("BBA", 2, "A1"): "105",
+        ("BBA", 2, "A2"): "106",
+        ("BBA", 2, "A3"): "108",
+        ("BBA", 3, "A1"): "201",
+        ("BBA", 3, "A2"): "202",
+        ("BBA", 3, "A3"): "203",
+        ("LLB", 1, "A1"): "206",
+        ("LLB", 1, "A2"): "207",
+        ("LLB", 2, "A1"): "208",
+        ("LLB", 2, "A2"): "301",
+        ("LLB", 3, "A1"): "302",
+        ("LLB", 3, "A2"): "303",
+        ("LLB", 4, "A1"): "304",
+        ("LLB", 4, "A2"): "305",
+        ("LLB", 5, "A1"): "306",
+        ("LLB", 5, "A2"): "307",
+    }
+
+    sections = conn.execute(
+        """
+        SELECT s.id, s.shift, s.year_number, s.section_code, s.primary_room_id, c.code AS course_code
+        FROM sections s
+        JOIN courses c ON c.id = s.course_id
+        """
+    ).fetchall()
+
+    for sec in sections:
+        if sec["primary_room_id"] is None:
+            key = (sec["course_code"], sec["year_number"], sec["section_code"])
+            rcode = primary_code_map.get(key)
+            if rcode and rcode in room_map:
+                conn.execute("UPDATE sections SET primary_room_id = ? WHERE id = ?", (room_map[rcode], sec["id"]))

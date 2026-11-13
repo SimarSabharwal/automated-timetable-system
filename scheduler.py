@@ -150,7 +150,15 @@ def check_slot_conflict(
 
         if subject["requires_lab"] and room["room_type"] != "COMPUTER_LAB":
             conflicts.append(
-                f"Subject '{subject['subject_name']}' requires a COMPUTER_LAB, but {room['room_code']} is {room['room_type']}."
+                f"Subject '{subject['subject_name']}' is a lab subject and requires a dedicated COMPUTER_LAB (e.g. G04, 104, 107), but {room['room_code']} is {room['room_type']}."
+            )
+        elif not subject["requires_lab"] and room["room_type"] == "COMPUTER_LAB":
+            conflicts.append(
+                f"Subject '{subject['subject_name']}' is a theory subject and must be assigned to a standard CLASSROOM. Computer labs are dedicated exclusively to lab practicals."
+            )
+        elif not subject["requires_lab"] and room["room_type"] in EVENT_ONLY_ROOM_TYPES:
+            conflicts.append(
+                f"Subject '{subject['subject_name']}' is a regular course lecture and cannot be scheduled in {room['room_type']}. Regular courses must use CLASSROOM or COMPUTER_LAB."
             )
 
     # Clause 4 (Student System): Holiday / Exam Exclusion for DATED allotments
@@ -504,18 +512,25 @@ def automate_timetable(
     skipped_slots: list[dict[str, Any]] = []
     section_summaries: list[dict[str, Any]] = []
 
-    for sec_id in section_ids:
-        sec = conn.execute(
-            """
-            SELECT s.*, c.code AS course_code
+    # Pre-load all requested sections
+    placeholders = ",".join("?" for _ in section_ids)
+    all_sections = [
+        dict(s)
+        for s in conn.execute(
+            f"""
+            SELECT s.*, c.code AS course_code, c.name AS course_name
             FROM sections s JOIN courses c ON c.id = s.course_id
-            WHERE s.id = ?
+            WHERE s.id IN ({placeholders})
+            ORDER BY s.shift, s.course_id, s.year_number, s.section_code
             """,
-            (sec_id,),
-        ).fetchone()
-        if not sec:
-            continue
+            tuple(section_ids),
+        ).fetchall()
+    ]
 
+    # Pre-load per-section data
+    sec_data: dict[int, dict[str, Any]] = {}
+    for sec in all_sections:
+        sid = sec["id"]
         subjects = [
             dict(sub)
             for sub in conn.execute(
@@ -523,32 +538,19 @@ def automate_timetable(
                 (sec["course_id"], sec["year_number"]),
             ).fetchall()
         ]
-        if not subjects:
-            section_summaries.append(
-                {
-                    "section_id": sec_id,
-                    "label": f"{sec['course_code']} Y{sec['year_number']} {sec['section_code']}",
-                    "created": 0,
-                    "warning": "No subjects configured for this course/year.",
-                }
-            )
-            continue
-
-        shift = sec["shift"]
-        slots = compute_shift_slots(shift, shift_config)
-
         existing_rows = conn.execute(
             f"""
             SELECT te.* FROM timetable_entries te
             WHERE te.section_id = ? AND {OVERLAP_PREDICATE}
             """,
-            (sec_id, *ov),
+            (sid, *ov),
         ).fetchall()
-        existing_slot_keys = {(r["day_of_week"], r["slot_index"]) for r in existing_rows}
 
         subject_counts: dict[int, int] = {sub["id"]: 0 for sub in subjects}
         day_subjects: dict[str, dict[int, int]] = {d: {} for d in weekdays}
         day_slot_faculty: dict[tuple[str, int], int] = {}
+        day_has_lab: dict[str, bool] = {d: False for d in weekdays}
+
         for r in existing_rows:
             if r["subject_id"] in subject_counts:
                 subject_counts[r["subject_id"]] += 1
@@ -559,189 +561,305 @@ def automate_timetable(
                 if r["faculty_id"]:
                     day_slot_faculty[(r["day_of_week"], r["slot_index"])] = r["faculty_id"]
 
-        sec_created = 0
+        # Check if existing entries had a lab on that day
+        for r in existing_rows:
+            matched_sub = next((sb for sb in subjects if sb["id"] == r["subject_id"]), None)
+            if matched_sub and matched_sub["requires_lab"] and r["day_of_week"] in day_has_lab:
+                day_has_lab[r["day_of_week"]] = True
+
+        sec_data[sid] = {
+            "sec": sec,
+            "subjects": subjects,
+            "lab_subjects": [sb for sb in subjects if sb["requires_lab"]],
+            "theory_subjects": [sb for sb in subjects if not sb["requires_lab"]],
+            "existing_slot_keys": {(r["day_of_week"], r["slot_index"]) for r in existing_rows},
+            "subject_counts": subject_counts,
+            "day_subjects": day_subjects,
+            "day_slot_faculty": day_slot_faculty,
+            "day_has_lab": day_has_lab,
+            "sec_created": 0,
+        }
+
+    # Group sections by shift (Morning vs Afternoon run on different clock times)
+    classrooms = [r for r in rooms if r["room_type"] == "CLASSROOM"]
+    labs = [r for r in rooms if r["room_type"] == "COMPUTER_LAB"]
+
+    def _is_room_busy(room_id: int, day: str, slot: dict[str, Any]) -> bool:
+        return bool(
+            conn.execute(
+                f"""
+                SELECT 1 FROM timetable_entries te
+                WHERE te.room_id = ? AND te.day_of_week = ?
+                  AND te.start_time < ? AND ? < te.end_time
+                  AND {OVERLAP_PREDICATE}
+                """,
+                (room_id, day, slot["end_time"], slot["start_time"], *ov),
+            ).fetchone()
+        )
+
+    def _pick_faculty(sub: dict[str, Any], sec: dict[str, Any], s_info: dict[str, Any], day: str, slot: dict[str, Any]) -> int | None:
+        shift = sec["shift"]
+        s_idx = slot["slot_index"]
+        qualified_ids = qual_map.get(sub["id"], [])
+        cand_fac_ids: list[int] = []
+        if sub.get("faculty_id") and sub["faculty_id"] in qualified_ids:
+            cand_fac_ids.append(sub["faculty_id"])
+        for qid in qualified_ids:
+            if qid not in cand_fac_ids:
+                cand_fac_ids.append(qid)
+        if not cand_fac_ids:
+            return None
+
+        for fid in cand_fac_ids:
+            # 1. Unavailability window
+            if validity_type == "DATED" and effective_from and effective_to:
+                unav = conn.execute(
+                    """
+                    SELECT 1 FROM teacher_availability
+                    WHERE faculty_id = ? AND (shift = 'ALL' OR shift = ?)
+                      AND start_date <= ? AND ? <= end_date
+                    """,
+                    (fid, shift, effective_to, effective_from),
+                ).fetchone()
+            else:
+                unav = conn.execute(
+                    "SELECT 1 FROM teacher_availability WHERE faculty_id = ? AND (shift = 'ALL' OR shift = ?)",
+                    (fid, shift),
+                ).fetchone()
+            if unav:
+                continue
+
+            # 2. Collision (time-interval overlap)
+            fac_busy = conn.execute(
+                f"""
+                SELECT 1 FROM timetable_entries te
+                WHERE te.faculty_id = ? AND te.day_of_week = ?
+                  AND te.start_time < ? AND ? < te.end_time
+                  AND {OVERLAP_PREDICATE}
+                """,
+                (fid, day, slot["end_time"], slot["start_time"], *ov),
+            ).fetchone()
+            if fac_busy:
+                continue
+
+            # 3. Teacher Repeat Clause: avoid consecutive back-to-back in same section if alternatives exist
+            if (
+                s_info["day_slot_faculty"].get((day, s_idx - 1)) == fid
+                or s_info["day_slot_faculty"].get((day, s_idx + 1)) == fid
+            ):
+                if len(cand_fac_ids) > 1:
+                    continue
+
+            # 4. Check max daily workload
+            day_load = conn.execute(
+                f"""
+                SELECT COUNT(*) FROM timetable_entries te
+                WHERE te.faculty_id = ? AND te.day_of_week = ? AND {OVERLAP_PREDICATE}
+                """,
+                (fid, day, *ov),
+            ).fetchone()[0]
+            if day_load >= fac_limits.get(fid, 4):
+                continue
+
+            return fid
+        return None
+
+    def _pick_free_lab(sec: dict[str, Any], day: str, slot: dict[str, Any]) -> dict[str, Any] | None:
+        for rm in labs:
+            if rm["capacity"] < sec["capacity"]:
+                continue
+            if not _is_room_busy(rm["id"], day, slot):
+                return rm
+        return None
+
+    def _pick_free_classroom(sec: dict[str, Any], day: str, slot: dict[str, Any]) -> dict[str, Any] | None:
+        shift = sec["shift"]
+        # Priority 1: Section's own primary classroom
+        prim_id = sec.get("primary_room_id")
+        if prim_id and not _is_room_busy(prim_id, day, slot):
+            return next((r for r in classrooms if r["id"] == prim_id), None)
+
+        # Priority 2: Free classroom that is NOT the primary classroom of another section in this shift
+        for rm in classrooms:
+            if rm["capacity"] < sec["capacity"]:
+                continue
+            reserved_owner = primary_reservations.get((shift, rm["id"]))
+            if reserved_owner is not None and reserved_owner != sec["id"]:
+                continue  # Reserved for another section's primary room
+            if not _is_room_busy(rm["id"], day, slot):
+                return rm
+
+        # Priority 3: Any free classroom
+        for rm in classrooms:
+            if rm["capacity"] >= sec["capacity"] and not _is_room_busy(rm["id"], day, slot):
+                return rm
+        return None
+
+    def _insert_entry(sec: dict[str, Any], sub: dict[str, Any], fac_id: int, rm: dict[str, Any], day: str, slot: dict[str, Any], is_lab: bool = False, is_primary: bool = False):
+        val_label = "Lifetime" if validity_type == "LIFETIME" else f"{effective_from}..{effective_to}"
+        if is_lab:
+            room_label = f"Computer Lab {rm['room_code']}"
+        elif is_primary:
+            room_label = f"Primary Room {rm['room_code']}"
+        else:
+            room_label = f"Classroom {rm['room_code']}"
+        reason = f"Auto-allotted [{val_label}] ({room_label})"
+
+        conn.execute(
+            """
+            INSERT INTO timetable_entries (
+                section_id, day_of_week, shift, slot_index,
+                start_time, end_time, subject_id, faculty_id, room_id,
+                assignment_mode, validity_type, effective_from, effective_to, reason
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'AUTO', ?, ?, ?, ?)
+            """,
+            (
+                sec["id"],
+                day,
+                sec["shift"],
+                slot["slot_index"],
+                slot["start_time"],
+                slot["end_time"],
+                sub["id"],
+                fac_id,
+                rm["id"],
+                validity_type,
+                effective_from if validity_type == "DATED" else None,
+                effective_to if validity_type == "DATED" else None,
+                reason,
+            ),
+        )
+
+    # Process each shift cohesively slot-by-slot
+    for shift in ("MORNING", "AFTERNOON"):
+        shift_secs = [s for s in all_sections if s["shift"] == shift]
+        if not shift_secs:
+            continue
+        slots = compute_shift_slots(shift, shift_config)
+
         for day in weekdays:
             for slot in slots:
                 s_idx = slot["slot_index"]
-                if (day, s_idx) in existing_slot_keys:
+
+                # Find sections in this shift needing a class in this slot
+                unfilled_secs = [
+                    s for s in shift_secs
+                    if (day, s_idx) not in sec_data[s["id"]]["existing_slot_keys"]
+                ]
+                if not unfilled_secs:
                     continue
 
-                ordered_subjects = sorted(
-                    subjects,
-                    key=lambda sb: (
-                        day_subjects[day].get(sb["id"], 0),
-                        subject_counts[sb["id"]] - sb["lectures_per_week"],
-                        subject_counts[sb["id"]],
-                    ),
-                )
+                # --- PHASE 1: COHESIVE COMPUTER LAB ALLOCATION ---
+                # Rotate available computer labs (G04, 104, 107) across sections needing labs
+                lab_candidates = []
+                for s in unfilled_secs:
+                    s_info = sec_data[s["id"]]
+                    needed_labs = [
+                        sub for sub in s_info["lab_subjects"]
+                        if s_info["subject_counts"].get(sub["id"], 0) < sub["lectures_per_week"]
+                        and s_info["day_subjects"][day].get(sub["id"], 0) < 1
+                    ]
+                    if needed_labs and not s_info["day_has_lab"].get(day, False):
+                        deficit = sum(sub["lectures_per_week"] - s_info["subject_counts"].get(sub["id"], 0) for sub in needed_labs)
+                        lab_candidates.append((deficit, s, needed_labs))
 
-                placed = False
-                for sub in ordered_subjects:
-                    if day_subjects[day].get(sub["id"], 0) >= 2:
-                        continue  # Max 2 lectures of same subject per day
+                # Prioritize section with highest remaining lab deficit
+                lab_candidates.sort(key=lambda x: x[0], reverse=True)
 
-                    # Candidate qualified teachers (default faculty first, then other qualified teachers)
-                    qualified_ids = qual_map.get(sub["id"], [])
-                    cand_fac_ids: list[int | None] = []
-                    if sub["faculty_id"] and sub["faculty_id"] in qualified_ids:
-                        cand_fac_ids.append(sub["faculty_id"])
-                    for qid in qualified_ids:
-                        if qid not in cand_fac_ids:
-                            cand_fac_ids.append(qid)
-                    if not cand_fac_ids:
-                        continue  # Qualification Clause: no qualified teacher mapped
+                assigned_in_slot: set[int] = set()
 
-                    chosen_fac_id: int | None = None
-                    for fid in cand_fac_ids:
-                        # Check teacher unavailability
-                        if validity_type == "DATED" and effective_from and effective_to:
-                            unav = conn.execute(
-                                """
-                                SELECT 1 FROM teacher_availability
-                                WHERE faculty_id = ? AND (shift = 'ALL' OR shift = ?)
-                                  AND start_date <= ? AND ? <= end_date
-                                """,
-                                (fid, shift, effective_to, effective_from),
-                            ).fetchone()
-                        else:
-                            unav = conn.execute(
-                                "SELECT 1 FROM teacher_availability WHERE faculty_id = ? AND (shift = 'ALL' OR shift = ?)",
-                                (fid, shift),
-                            ).fetchone()
-                        if unav:
+                for deficit, s, needed_labs in lab_candidates:
+                    s_info = sec_data[s["id"]]
+                    needed_labs.sort(key=lambda sb: (s_info["subject_counts"].get(sb["id"], 0) - sb["lectures_per_week"], s_info["subject_counts"].get(sb["id"], 0)))
+
+                    for sub in needed_labs:
+                        fac_id = _pick_faculty(sub, s, s_info, day, slot)
+                        if fac_id is None:
+                            continue
+                        lab_rm = _pick_free_lab(s, day, slot)
+                        if lab_rm is None:
                             continue
 
-                        # Check teacher slot collision (time-interval overlap)
-                        fac_busy = conn.execute(
-                            f"""
-                            SELECT 1 FROM timetable_entries te
-                            WHERE te.faculty_id = ? AND te.day_of_week = ?
-                              AND te.start_time < ? AND ? < te.end_time
-                              AND {OVERLAP_PREDICATE}
-                            """,
-                            (fid, day, slot["end_time"], slot["start_time"], *ov),
-                        ).fetchone()
-                        if fac_busy:
-                            continue
-
-                        # Teacher Repeat Clause: avoid consecutive back-to-back lectures in same section
-                        if (
-                            day_slot_faculty.get((day, s_idx - 1)) == fid
-                            or day_slot_faculty.get((day, s_idx + 1)) == fid
-                        ):
-                            continue
-
-                        # Check teacher max daily workload
-                        day_load = conn.execute(
-                            f"""
-                            SELECT COUNT(*) FROM timetable_entries te
-                            WHERE te.faculty_id = ? AND te.day_of_week = ? AND {OVERLAP_PREDICATE}
-                            """,
-                            (fid, day, *ov),
-                        ).fetchone()[0]
-                        if day_load >= fac_limits.get(fid, 4):
-                            continue
-
-                        chosen_fac_id = fid
+                        _insert_entry(s, sub, fac_id, lab_rm, day, slot, is_lab=True)
+                        s_info["subject_counts"][sub["id"]] = s_info["subject_counts"].get(sub["id"], 0) + 1
+                        s_info["day_subjects"][day][sub["id"]] = s_info["day_subjects"][day].get(sub["id"], 0) + 1
+                        s_info["day_slot_faculty"][(day, s_idx)] = fac_id
+                        s_info["existing_slot_keys"].add((day, s_idx))
+                        s_info["day_has_lab"][day] = True
+                        s_info["sec_created"] += 1
+                        created_count += 1
+                        assigned_in_slot.add(s["id"])
                         break
 
-                    if chosen_fac_id is None:
-                        continue
-
-                    booked_room_ids = {
-                        r["room_id"]
-                        for r in conn.execute(
-                            f"""
-                            SELECT te.room_id FROM timetable_entries te
-                            WHERE te.day_of_week = ? AND te.start_time < ? AND ? < te.end_time
-                              AND {OVERLAP_PREDICATE}
-                            """,
-                            (day, slot["end_time"], slot["start_time"], *ov),
-                        ).fetchall()
-                    }
-
-                    candidate_rooms = [
-                        rm
-                        for rm in rooms
-                        if rm["id"] not in booked_room_ids
-                        and rm["capacity"] >= sec["capacity"]
-                        and (
-                            (sub["requires_lab"] and rm["room_type"] == "COMPUTER_LAB")
-                            or (not sub["requires_lab"] and rm["room_type"] != "COMPUTER_LAB")
-                        )
+                # --- PHASE 2: THEORY ALLOCATION IN PRIMARY CLASSROOMS ---
+                # All remaining sections take theory lectures in their primary classrooms
+                theory_secs = [s for s in unfilled_secs if s["id"] not in assigned_in_slot]
+                for s in theory_secs:
+                    s_info = sec_data[s["id"]]
+                    theory_subs = [
+                        sub for sub in s_info["theory_subjects"]
+                        if s_info["day_subjects"][day].get(sub["id"], 0) < 2
                     ]
-                    if not candidate_rooms:
+                    if not theory_subs:
                         continue
 
-                    def room_rank(rm: dict[str, Any]) -> tuple[int, int, int, str]:
-                        is_own_primary = 0 if rm["id"] == sec["primary_room_id"] else 1
-                        reserved_owner = primary_reservations.get((shift, rm["id"]))
-                        is_other_primary = 1 if (reserved_owner is not None and reserved_owner != sec_id) else 0
-                        type_pref = 0 if rm["room_type"] == "CLASSROOM" else 1
-                        return (is_own_primary, is_other_primary, type_pref, rm["room_code"])
-
-                    candidate_rooms.sort(key=room_rank)
-                    chosen_room = candidate_rooms[0]
-
-                    val_label = "Lifetime" if validity_type == "LIFETIME" else f"{effective_from}..{effective_to}"
-                    reason = (
-                        f"Auto-allotted [{val_label}] ({'Primary Room' if chosen_room['id'] == sec['primary_room_id'] else 'Available Room'})"
-                    )
-                    conn.execute(
-                        """
-                        INSERT INTO timetable_entries (
-                            section_id, day_of_week, shift, slot_index,
-                            start_time, end_time, subject_id, faculty_id, room_id,
-                            assignment_mode, validity_type, effective_from, effective_to, reason
+                    theory_subs.sort(
+                        key=lambda sb: (
+                            s_info["day_subjects"][day].get(sb["id"], 0),
+                            s_info["subject_counts"].get(sb["id"], 0) - sb["lectures_per_week"],
+                            s_info["subject_counts"].get(sb["id"], 0),
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'AUTO', ?, ?, ?, ?)
-                        """,
-                        (
-                            sec_id,
-                            day,
-                            shift,
-                            s_idx,
-                            slot["start_time"],
-                            slot["end_time"],
-                            sub["id"],
-                            chosen_fac_id,
-                            chosen_room["id"],
-                            validity_type,
-                            effective_from if validity_type == "DATED" else None,
-                            effective_to if validity_type == "DATED" else None,
-                            reason,
-                        ),
-                    )
-                    subject_counts[sub["id"]] += 1
-                    day_subjects[day][sub["id"]] = day_subjects[day].get(sub["id"], 0) + 1
-                    day_slot_faculty[(day, s_idx)] = chosen_fac_id
-                    sec_created += 1
-                    created_count += 1
-                    placed = True
-                    break
-
-                if not placed:
-                    skipped_slots.append(
-                        {
-                            "section": f"{sec['course_code']} Y{sec['year_number']} {sec['section_code']}",
-                            "day": day,
-                            "slot_index": s_idx,
-                            "reason": "No conflict-free room / qualified available teacher combination.",
-                        }
                     )
 
-        section_summaries.append(
-            {
-                "section_id": sec_id,
-                "label": f"{sec['course_code']} Y{sec['year_number']} {sec['section_code']}",
-                "created": sec_created,
-            }
-        )
+                    placed_theory = False
+                    for sub in theory_subs:
+                        fac_id = _pick_faculty(sub, s, s_info, day, slot)
+                        if fac_id is None:
+                            continue
+                        theory_rm = _pick_free_classroom(s, day, slot)
+                        if theory_rm is None:
+                            continue
+
+                        is_prim = (theory_rm["id"] == s.get("primary_room_id"))
+                        _insert_entry(s, sub, fac_id, theory_rm, day, slot, is_lab=False, is_primary=is_prim)
+                        s_info["subject_counts"][sub["id"]] = s_info["subject_counts"].get(sub["id"], 0) + 1
+                        s_info["day_subjects"][day][sub["id"]] = s_info["day_subjects"][day].get(sub["id"], 0) + 1
+                        s_info["day_slot_faculty"][(day, s_idx)] = fac_id
+                        s_info["existing_slot_keys"].add((day, s_idx))
+                        s_info["sec_created"] += 1
+                        created_count += 1
+                        placed_theory = True
+                        break
+
+                    if not placed_theory:
+                        skipped_slots.append(
+                            {
+                                "section": f"{s['course_code']} Y{s['year_number']} {s['section_code']}",
+                                "day": day,
+                                "slot_index": s_idx,
+                                "reason": "No conflict-free classroom or qualified available teacher combination.",
+                            }
+                        )
+
+    for s in all_sections:
+        s_info = sec_data[s["id"]]
+        summary_item: dict[str, Any] = {
+            "section_id": s["id"],
+            "label": f"{s['course_code']} Y{s['year_number']} {s['section_code']}",
+            "created": s_info["sec_created"],
+        }
+        if not s_info["subjects"]:
+            summary_item["warning"] = "No subjects configured for this course/year."
+        section_summaries.append(summary_item)
 
     conn.commit()
     return {
         "created_count": created_count,
-        "section_summaries": section_summaries,
+        "validity_type": validity_type,
+        "effective_from": effective_from if validity_type == "DATED" else None,
+        "effective_to": effective_to if validity_type == "DATED" else None,
+        "sections": section_summaries,
         "skipped_slots": skipped_slots,
         "excluded_events": excluded_events,
     }

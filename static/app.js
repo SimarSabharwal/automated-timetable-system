@@ -118,13 +118,13 @@ function populateStaticDropdowns() {
     .map((s) => `<option value="${s.id}">${s.course_code} Y${s.year_number} • ${s.subject_code} — ${s.subject_name}</option>`)
     .join("");
 
-  const activeCourseRooms = state.rooms.filter(
-    (r) => r.status === "ACTIVE" && r.room_type !== "AMPHITHEATER" && r.room_type !== "AUDITORIUM"
+  const activeClassrooms = state.rooms.filter(
+    (r) => r.status === "ACTIVE" && r.room_type === "CLASSROOM"
   );
   $("sel-primary-room").innerHTML =
-    `<option value="">-- None (Auto pick) --</option>` +
-    activeCourseRooms
-      .map((r) => `<option value="${r.id}">${r.room_code} (${r.room_type}, Cap ${r.capacity})</option>`)
+    `<option value="">-- None (Auto pick classroom) --</option>` +
+    activeClassrooms
+      .map((r) => `<option value="${r.id}">${r.room_code} (Classroom, ${r.floor}, Cap ${r.capacity})</option>`)
       .join("");
 
   $("filter-course").innerHTML =
@@ -224,6 +224,30 @@ function syncSubjectFaculty() {
   const opt = sel.options[sel.selectedIndex];
   if (opt && opt.dataset.faculty) {
     $("man-faculty").value = opt.dataset.faculty;
+  }
+  const subId = Number(sel.value);
+  const sub = state.subjects.find((s) => s.id === subId);
+  const sec = getSelectedSection();
+  if (sub && state.roomMatrix && state.roomMatrix.length) {
+    if (sub.requires_lab) {
+      const freeLab = state.roomMatrix.find((r) => r.room_type === "COMPUTER_LAB" && r.availability === "FREE");
+      const anyLab = state.roomMatrix.find((r) => r.room_type === "COMPUTER_LAB");
+      if (freeLab) {
+        $("man-room").value = String(freeLab.id);
+      } else if (anyLab) {
+        $("man-room").value = String(anyLab.id);
+      }
+    } else {
+      if (sec && sec.primary_room_id && state.roomMatrix.some((r) => r.id === sec.primary_room_id)) {
+        $("man-room").value = String(sec.primary_room_id);
+      } else {
+        const freeCls = state.roomMatrix.find((r) => r.room_type === "CLASSROOM" && r.availability === "FREE");
+        if (freeCls) {
+          $("man-room").value = String(freeCls.id);
+        }
+      }
+    }
+    updateRoomStatusHint();
   }
 }
 
@@ -395,6 +419,21 @@ function updateRoomStatusHint() {
     hint.className = "room-hint";
     return;
   }
+  const subId = Number($("man-subject").value);
+  const sub = state.subjects.find((s) => s.id === subId);
+  const sec = getSelectedSection();
+  if (sub) {
+    if (sub.requires_lab && rm.room_type !== "COMPUTER_LAB") {
+      hint.className = "room-hint booked";
+      hint.textContent = `Incompatible: Subject '${sub.subject_name}' requires a dedicated COMPUTER_LAB (G04, 104, 107), but ${rm.room_code} is ${rm.room_type}.`;
+      return;
+    }
+    if (!sub.requires_lab && rm.room_type === "COMPUTER_LAB") {
+      hint.className = "room-hint booked";
+      hint.textContent = `Incompatible: Subject '${sub.subject_name}' is a theory subject and must be assigned to a standard CLASSROOM. Computer labs are dedicated to practicals.`;
+      return;
+    }
+  }
   if (rm.availability === "BOOKED") {
     const b = rm.booking;
     const owner =
@@ -407,8 +446,9 @@ function updateRoomStatusHint() {
     hint.className = "room-hint booked";
     hint.textContent = `Unavailable: ${rm.room_code} is under MAINTENANCE.`;
   } else {
+    const isPrimary = sec && sec.primary_room_id === rm.id;
     hint.className = "room-hint free";
-    hint.textContent = `Available: ${rm.room_code} (${rm.building}, ${rm.floor}, Cap ${rm.capacity}) is FREE.`;
+    hint.textContent = `Available: Room ${rm.room_code} (${rm.room_type}, ${rm.floor}, Cap ${rm.capacity}) is FREE${isPrimary ? " [Dedicated Primary Classroom]" : ""}.`;
   }
 }
 
@@ -837,6 +877,9 @@ function getAutomationScopeSectionIds() {
   const year = Number($("sel-year").value);
   const scope = $("auto-scope").value;
 
+  if (scope === "all") {
+    return state.sections.map((s) => s.id);
+  }
   if (scope === "section" && sec) {
     return [sec.id];
   }
@@ -852,6 +895,21 @@ function getAutomationScopeSectionIds() {
   }
   return [];
 }
+
+$("auto-scope").addEventListener("change", () => {
+  const scope = $("auto-scope").value;
+  const hintEl = $("auto-scope-hint");
+  if (!hintEl) return;
+  if (scope === "all") {
+    hintEl.textContent = "Cohesive Multi-Department Mode: Interleaves BCA, BBA, MBA, LLB together slot-by-slot, rotating computer labs fairly and keeping theory classes in dedicated primary classrooms.";
+  } else if (scope === "course") {
+    hintEl.textContent = "Generates timetable for all years & shifts of the selected course.";
+  } else if (scope === "year") {
+    hintEl.textContent = "Generates timetable for all sections of the selected course & year.";
+  } else {
+    hintEl.textContent = "Generates timetable for the selected section only.";
+  }
+});
 
 $("auto-form").addEventListener("submit", async (e) => {
   e.preventDefault();

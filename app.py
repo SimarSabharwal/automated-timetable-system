@@ -181,13 +181,49 @@ def set_primary_room(section_id: int):
     room_id = data.get("room_id")
     conn = get_connection()
     try:
-        sec = conn.execute("SELECT * FROM sections WHERE id = ?", (section_id,)).fetchone()
+        sec = conn.execute(
+            """
+            SELECT s.*, c.code AS course_code
+            FROM sections s
+            JOIN courses c ON c.id = s.course_id
+            WHERE s.id = ?
+            """,
+            (section_id,),
+        ).fetchone()
         if not sec:
             return jsonify({"error": "Section not found"}), 404
         if room_id is not None and room_id != "":
             room = conn.execute("SELECT * FROM rooms WHERE id = ?", (int(room_id),)).fetchone()
             if not room:
                 return jsonify({"error": "Room not found"}), 404
+            if room["room_type"] != "CLASSROOM":
+                return (
+                    jsonify(
+                        {
+                            "error": f"Room {room['room_code']} is a {room['room_type']}. Only standard CLASSROOMs can be assigned as a Primary Class (Home Room). Computer Labs and Auditoriums cannot be set as primary rooms."
+                        }
+                    ),
+                    400,
+                )
+            # Check if another section in this shift already claims this classroom as its primary room
+            conflict = conn.execute(
+                """
+                SELECT s.*, c.code AS course_code
+                FROM sections s
+                JOIN courses c ON c.id = s.course_id
+                WHERE s.primary_room_id = ? AND s.shift = ? AND s.id != ?
+                """,
+                (int(room_id), sec["shift"], section_id),
+            ).fetchone()
+            if conflict:
+                return (
+                    jsonify(
+                        {
+                            "error": f"Room {room['room_code']} is already assigned as the Primary Class for {conflict['course_code']} Year {conflict['year_number']} ({conflict['shift']} - {conflict['section_code']}). Each classroom can only be the primary room for one section per shift."
+                        }
+                    ),
+                    400,
+                )
             conn.execute(
                 "UPDATE sections SET primary_room_id = ? WHERE id = ?",
                 (int(room_id), section_id),
@@ -195,7 +231,18 @@ def set_primary_room(section_id: int):
         else:
             conn.execute("UPDATE sections SET primary_room_id = NULL WHERE id = ?", (section_id,))
         conn.commit()
-        return jsonify({"ok": True})
+        return jsonify({"ok": True, "primary_room_id": int(room_id) if room_id else None})
+    finally:
+        conn.close()
+
+
+@app.route("/api/v1/sections/auto-assign-primary-rooms", methods=["POST"])
+def auto_assign_primary_rooms_route():
+    conn = get_connection()
+    try:
+        db.assign_default_primary_rooms(conn)
+        conn.commit()
+        return jsonify({"ok": True, "message": "Primary classrooms assigned to all sections."})
     finally:
         conn.close()
 
@@ -473,21 +520,25 @@ def run_automation():
     section_ids = [int(x) for x in (data.get("section_ids") or [])]
     conn = get_connection()
     try:
-        # Auto-resolve course_code and year if section_ids not provided
-        if not section_ids and data.get("course_code"):
-            c_code = str(data["course_code"]).strip().upper()
-            yr = data.get("year_number")
-            sh = data.get("shift")
-            sql = "SELECT s.id FROM sections s JOIN courses c ON c.id = s.course_id WHERE UPPER(c.code) = ?"
-            params: list[Any] = [c_code]
-            if yr is not None:
-                sql += " AND s.year_number = ?"
-                params.append(int(yr))
-            if sh is not None:
-                sql += " AND UPPER(s.shift) = UPPER(?)"
-                params.append(str(sh).strip())
-            rows = conn.execute(sql, params).fetchall()
-            section_ids = [r["id"] for r in rows]
+        # Auto-resolve course_code, year, or global scope if section_ids not provided
+        if not section_ids:
+            if data.get("scope") == "all" or data.get("all_courses"):
+                rows = conn.execute("SELECT id FROM sections ORDER BY shift, course_id, year_number, section_code").fetchall()
+                section_ids = [r["id"] for r in rows]
+            elif data.get("course_code"):
+                c_code = str(data["course_code"]).strip().upper()
+                yr = data.get("year_number")
+                sh = data.get("shift")
+                sql = "SELECT s.id FROM sections s JOIN courses c ON c.id = s.course_id WHERE UPPER(c.code) = ?"
+                params: list[Any] = [c_code]
+                if yr is not None:
+                    sql += " AND s.year_number = ?"
+                    params.append(int(yr))
+                if sh is not None:
+                    sql += " AND UPPER(s.shift) = UPPER(?)"
+                    params.append(str(sh).strip())
+                rows = conn.execute(sql, params).fetchall()
+                section_ids = [r["id"] for r in rows]
 
         if not section_ids:
             return jsonify({"error": "Select or provide at least one section/course to automate."}), 400
