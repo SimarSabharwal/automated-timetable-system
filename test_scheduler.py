@@ -383,6 +383,87 @@ def run_tests():
         assert all(e["assignment_mode"] == "MANUAL" for e in remaining_bba)
         assert len(remaining_bba) >= 2  # Manual slots remain untouched
 
+        # 10. ERP Integration & API Caller capabilities
+        # 10a. Health check endpoint
+        health = client.get("/api/v1/health").get_json()
+        assert health["status"] == "healthy"
+        assert health["database"] == "connected"
+
+        # 10b. Natural codes in manual_allot (calling as external ERP without internal SQLite IDs)
+        erp_allot = client.post(
+            "/api/v1/timetable/manual",
+            json={
+                "course_code": "BBA",
+                "year_number": 1,
+                "shift": "MORNING",
+                "section_code": "M2",
+                "day_of_week": "Thursday",
+                "slot_index": 2,
+                "subject_code": "34136",
+                "faculty_code": "AK",
+                "room_code": "201",
+                "validity_type": "LIFETIME",
+                "reason": "ERP External API Allotment",
+            },
+        )
+        assert erp_allot.status_code == 201, erp_allot.get_json()
+        assert erp_allot.get_json()["ok"] is True
+
+        # 10c. Natural codes in automate
+        auto_course_res = client.post(
+            "/api/v1/timetable/automate",
+            json={
+                "course_code": "BCA",
+                "year_number": 2,
+                "shift": "MORNING",
+                "weekdays": ["Monday", "Tuesday"],
+            },
+        )
+        assert auto_course_res.status_code == 200, auto_course_res.get_json()
+        assert auto_course_res.get_json()["created_count"] > 0
+
+        # 10d. Bulk Sync Rooms
+        sync_rm = client.post(
+            "/api/v1/sync/rooms",
+            json={
+                "rooms": [
+                    {
+                        "room_code": "TEST-LAB-99",
+                        "building": "New Science Wing",
+                        "floor": "Third Floor",
+                        "room_type": "COMPUTER_LAB",
+                        "capacity": 75,
+                        "status": "ACTIVE",
+                    }
+                ]
+            },
+        )
+        assert sync_rm.status_code == 200
+        assert sync_rm.get_json()["upserted_count"] == 1
+
+        # 10e. Bulk Sync Faculty & Qualification
+        sync_fac = client.post(
+            "/api/v1/sync/faculty",
+            json={
+                "faculty": [
+                    {
+                        "faculty_code": "NEW-FAC-01",
+                        "full_name": "Prof. External Guest",
+                        "department": "IT",
+                        "max_lectures_per_day": 3,
+                        "qualified_subject_codes": ["34344"],
+                    }
+                ]
+            },
+        )
+        assert sync_fac.status_code == 200
+        assert sync_fac.get_json()["upserted_count"] == 1
+
+        # 10f. Timetable Export for Parent ERP
+        exported = client.get("/api/v1/export/timetable?course_code=BBA").get_json()
+        assert exported["count"] > 0
+        assert any(e["room_code"] == "201" and e["reason"] == "ERP External API Allotment" for e in exported["timetable"])
+
         print("ALL STUDENT SYSTEM CLAUSES & LIFETIME/DATED TESTS PASSED!")
 
 
