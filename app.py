@@ -196,16 +196,7 @@ def set_primary_room(section_id: int):
             room = conn.execute("SELECT * FROM rooms WHERE id = ?", (int(room_id),)).fetchone()
             if not room:
                 return jsonify({"error": "Room not found"}), 404
-            if room["room_type"] != "CLASSROOM":
-                return (
-                    jsonify(
-                        {
-                            "error": f"Room {room['room_code']} is a {room['room_type']}. Only standard CLASSROOMs can be assigned as a Primary Class (Home Room). Computer Labs and Auditoriums cannot be set as primary rooms."
-                        }
-                    ),
-                    400,
-                )
-            # Check if another section in this shift already claims this classroom as its primary room
+            # Check if another section in this shift already claims this room as its primary room
             conflict = conn.execute(
                 """
                 SELECT s.*, c.code AS course_code
@@ -219,7 +210,7 @@ def set_primary_room(section_id: int):
                 return (
                     jsonify(
                         {
-                            "error": f"Room {room['room_code']} is already assigned as the Primary Class for {conflict['course_code']} Year {conflict['year_number']} ({conflict['shift']} - {conflict['section_code']}). Each classroom can only be the primary room for one section per shift."
+                            "error": f"Room {room['room_code']} is already assigned as the Primary Room for {conflict['course_code']} Year {conflict['year_number']} ({conflict['shift']} - {conflict['section_code']})."
                         }
                     ),
                     400,
@@ -754,7 +745,7 @@ def add_teacher_unavailability():
 
     conn = get_connection()
     try:
-        conn.execute(
+        cur = conn.execute(
             """
             INSERT INTO teacher_availability (faculty_id, start_date, end_date, shift, reason)
             VALUES (?, ?, ?, ?, ?)
@@ -762,7 +753,7 @@ def add_teacher_unavailability():
             (faculty_id, start_date, end_date, shift, reason),
         )
         conn.commit()
-        return jsonify({"ok": True}), 201
+        return jsonify({"ok": True, "id": cur.lastrowid}), 201
     finally:
         conn.close()
 

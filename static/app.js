@@ -118,13 +118,11 @@ function populateStaticDropdowns() {
     .map((s) => `<option value="${s.id}">${s.course_code} Y${s.year_number} • ${s.subject_code} — ${s.subject_name}</option>`)
     .join("");
 
-  const activeClassrooms = state.rooms.filter(
-    (r) => r.status === "ACTIVE" && r.room_type === "CLASSROOM"
-  );
+  const activeRooms = state.rooms.filter((r) => r.status === "ACTIVE");
   $("sel-primary-room").innerHTML =
-    `<option value="">-- None (Auto pick classroom) --</option>` +
-    activeClassrooms
-      .map((r) => `<option value="${r.id}">${r.room_code} (Classroom, ${r.floor}, Cap ${r.capacity})</option>`)
+    `<option value="">-- None (Auto pick room) --</option>` +
+    activeRooms
+      .map((r) => `<option value="${r.id}">${r.room_code} (${r.room_type}, ${r.floor}, Cap ${r.capacity})</option>`)
       .join("");
 
   $("filter-course").innerHTML =
@@ -219,6 +217,21 @@ function onYearOrShiftChange() {
   onSectionChange();
 }
 
+function isComputerSubject(sub, courseCode) {
+  if (sub.requires_lab) return true;
+  if (courseCode !== "BCA") return false;
+  const name = (sub.subject_name || "").toLowerCase();
+  const code = (sub.subject_code || "").toLowerCase();
+  const nonComp = ["statistics", "stat", "management", "sum", "yoga", "digital electronics", "environmental", "economics"];
+  return !nonComp.some((k) => name.includes(k) || code.includes(k));
+}
+
+function isMootCourtSubject(sub, courseCode) {
+  if (courseCode !== "LLB") return false;
+  const name = (sub.subject_name || "").toLowerCase();
+  return name.includes("moot") || name.includes("trial advocacy") || name.includes("drafting");
+}
+
 function syncSubjectFaculty() {
   const sel = $("man-subject");
   const opt = sel.options[sel.selectedIndex];
@@ -228,23 +241,34 @@ function syncSubjectFaculty() {
   const subId = Number(sel.value);
   const sub = state.subjects.find((s) => s.id === subId);
   const sec = getSelectedSection();
+  const course = getSelectedCourse();
   if (sub && state.roomMatrix && state.roomMatrix.length) {
-    if (sub.requires_lab) {
+    const cCode = course ? course.code : "";
+    if (isMootCourtSubject(sub, cCode)) {
+      const mootRoom = state.roomMatrix.find((r) => r.room_type === "MOOT_COURT" && r.availability === "FREE")
+        || state.roomMatrix.find((r) => r.room_type === "MOOT_COURT");
+      if (mootRoom) {
+        $("man-room").value = String(mootRoom.id);
+      }
+    } else if (isComputerSubject(sub, cCode)) {
+      const primLab = (sec && sec.primary_room_id)
+        ? state.roomMatrix.find((r) => r.id === sec.primary_room_id && r.room_type === "COMPUTER_LAB" && r.availability === "FREE")
+        : null;
       const freeLab = state.roomMatrix.find((r) => r.room_type === "COMPUTER_LAB" && r.availability === "FREE");
       const anyLab = state.roomMatrix.find((r) => r.room_type === "COMPUTER_LAB");
-      if (freeLab) {
-        $("man-room").value = String(freeLab.id);
-      } else if (anyLab) {
-        $("man-room").value = String(anyLab.id);
+      const targetLab = primLab || freeLab || anyLab;
+      if (targetLab) {
+        $("man-room").value = String(targetLab.id);
       }
     } else {
-      if (sec && sec.primary_room_id && state.roomMatrix.some((r) => r.id === sec.primary_room_id)) {
-        $("man-room").value = String(sec.primary_room_id);
-      } else {
-        const freeCls = state.roomMatrix.find((r) => r.room_type === "CLASSROOM" && r.availability === "FREE");
-        if (freeCls) {
-          $("man-room").value = String(freeCls.id);
-        }
+      const primCls = (sec && sec.primary_room_id)
+        ? state.roomMatrix.find((r) => r.id === sec.primary_room_id && r.room_type === "CLASSROOM" && r.availability === "FREE")
+        : null;
+      const freeCls = state.roomMatrix.find((r) => r.room_type === "CLASSROOM" && r.availability === "FREE");
+      const anyCls = state.roomMatrix.find((r) => r.room_type === "CLASSROOM");
+      const targetCls = primCls || freeCls || anyCls;
+      if (targetCls) {
+        $("man-room").value = String(targetCls.id);
       }
     }
     updateRoomStatusHint();
@@ -312,10 +336,8 @@ async function refreshManualRoomAvailability() {
     `/api/v1/rooms/availability?day=${encodeURIComponent(day)}&shift=${encodeURIComponent(shift)}&slot_index=${slot}` +
     (targetDate ? `&target_date=${encodeURIComponent(targetDate)}` : "");
   const data = await api(url);
-  // Exclude Amphitheater and Auditorium from course scheduling
-  state.roomMatrix = data.rooms.filter(
-    (r) => r.room_type !== "AMPHITHEATER" && r.room_type !== "AUDITORIUM"
-  );
+  // Include all rooms (Classroom, Computer Lab, Moot Court, Auditorium, Amphitheater)
+  state.roomMatrix = data.rooms;
 
   const prevRoom = $("man-room").value;
   $("man-room").innerHTML = state.roomMatrix
@@ -422,18 +444,9 @@ function updateRoomStatusHint() {
   const subId = Number($("man-subject").value);
   const sub = state.subjects.find((s) => s.id === subId);
   const sec = getSelectedSection();
-  if (sub) {
-    if (sub.requires_lab && rm.room_type !== "COMPUTER_LAB") {
-      hint.className = "room-hint booked";
-      hint.textContent = `Incompatible: Subject '${sub.subject_name}' requires a dedicated COMPUTER_LAB (G04, 104, 107), but ${rm.room_code} is ${rm.room_type}.`;
-      return;
-    }
-    if (!sub.requires_lab && rm.room_type === "COMPUTER_LAB") {
-      hint.className = "room-hint booked";
-      hint.textContent = `Incompatible: Subject '${sub.subject_name}' is a theory subject and must be assigned to a standard CLASSROOM. Computer labs are dedicated to practicals.`;
-      return;
-    }
-  }
+  const course = getSelectedCourse();
+  const cCode = course ? course.code : "";
+
   if (rm.availability === "BOOKED") {
     const b = rm.booking;
     const owner =
@@ -447,8 +460,18 @@ function updateRoomStatusHint() {
     hint.textContent = `Unavailable: ${rm.room_code} is under MAINTENANCE.`;
   } else {
     const isPrimary = sec && sec.primary_room_id === rm.id;
+    let badge = "";
+    if (isPrimary) {
+      badge = " [Dedicated Primary Room]";
+    } else if (sub && isMootCourtSubject(sub, cCode) && rm.room_type === "MOOT_COURT") {
+      badge = " [Dedicated Moot Court]";
+    } else if (sub && isComputerSubject(sub, cCode) && rm.room_type === "COMPUTER_LAB") {
+      badge = " [Computer Lab for IT/CS Subject]";
+    } else if (rm.room_type === "AUDITORIUM" || rm.room_type === "AMPHITHEATER") {
+      badge = " [Auditorium / Amphitheater]";
+    }
     hint.className = "room-hint free";
-    hint.textContent = `Available: Room ${rm.room_code} (${rm.room_type}, ${rm.floor}, Cap ${rm.capacity}) is FREE${isPrimary ? " [Dedicated Primary Classroom]" : ""}.`;
+    hint.textContent = `Available: Room ${rm.room_code} (${rm.room_type}, ${rm.floor}, Cap ${rm.capacity}) is FREE${badge}.`;
   }
 }
 

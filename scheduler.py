@@ -6,7 +6,36 @@ from typing import Any
 
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 WEEKDAY_TO_INT = {name: idx for idx, name in enumerate(WEEKDAYS)}
-EVENT_ONLY_ROOM_TYPES = ("AMPHITHEATER", "AUDITORIUM")
+
+
+def is_computer_subject(subject_code: str, subject_name: str, course_code: str, requires_lab: int = 0) -> bool:
+    """
+    Identifies computer/IT subjects that belong in a Computer Lab:
+    - Any subject flagged requires_lab=1.
+    - For BCA: almost all core computing subjects (C, Java, Python, Web, Networks, AI, Databases, OS, SE, etc.)
+      even when teaching theory, are taught with computers in the lab!
+    - Non-computer subjects for BCA (Statistics, Start-up Management, Yoga, Digital Electronics) are taught in classrooms.
+    """
+    if requires_lab:
+        return True
+    if course_code != "BCA":
+        return False
+    name_lower = subject_name.lower()
+    code_lower = subject_code.lower()
+    non_comp_keywords = ["statistics", "stat", "management", "sum", "yoga", "digital electronics", "environmental", "economics"]
+    if any(k in name_lower or k in code_lower for k in non_comp_keywords):
+        return False
+    return True
+
+
+def is_moot_court_subject(subject_code: str, subject_name: str, course_code: str) -> bool:
+    """
+    Identifies practical trial & advocacy subjects in Law that belong in the Moot Court room.
+    """
+    if course_code != "LLB":
+        return False
+    name_lower = subject_name.lower()
+    return "moot" in name_lower or "trial advocacy" in name_lower or "drafting" in name_lower
 
 DEFAULT_SHIFT_CONFIG = {
     "MORNING": {
@@ -132,11 +161,6 @@ def check_slot_conflict(
             f"Room {room['room_code']} is currently marked as {room['status']} and cannot be allotted."
         )
 
-    if not is_club and room["room_type"] in EVENT_ONLY_ROOM_TYPES:
-        conflicts.append(
-            f"{room['room_code']} ({room['room_type']}) is reserved for Co-Curricular events only and cannot be allotted to courses."
-        )
-
     if section and room["capacity"] < section["capacity"]:
         conflicts.append(
             f"Room {room['room_code']} capacity ({room['capacity']}) is smaller than section capacity ({section['capacity']})."
@@ -150,15 +174,7 @@ def check_slot_conflict(
 
         if subject["requires_lab"] and room["room_type"] != "COMPUTER_LAB":
             conflicts.append(
-                f"Subject '{subject['subject_name']}' is a lab subject and requires a dedicated COMPUTER_LAB (e.g. G04, 104, 107), but {room['room_code']} is {room['room_type']}."
-            )
-        elif not subject["requires_lab"] and room["room_type"] == "COMPUTER_LAB":
-            conflicts.append(
-                f"Subject '{subject['subject_name']}' is a theory subject and must be assigned to a standard CLASSROOM. Computer labs are dedicated exclusively to lab practicals."
-            )
-        elif not subject["requires_lab"] and room["room_type"] in EVENT_ONLY_ROOM_TYPES:
-            conflicts.append(
-                f"Subject '{subject['subject_name']}' is a regular course lecture and cannot be scheduled in {room['room_type']}. Regular courses must use CLASSROOM or COMPUTER_LAB."
+                f"Subject '{subject['subject_name']}' requires computers/lab equipment, but {room['room_code']} is a {room['room_type']}. Recommended: Computer Lab (G04, 104, 107)."
             )
 
     # Clause 4 (Student System): Holiday / Exam Exclusion for DATED allotments
@@ -478,7 +494,7 @@ def automate_timetable(
     rooms = [
         dict(r)
         for r in conn.execute(
-            "SELECT * FROM rooms WHERE status = 'ACTIVE' AND room_type NOT IN ('AMPHITHEATER', 'AUDITORIUM') ORDER BY room_code"
+            "SELECT * FROM rooms WHERE status = 'ACTIVE' ORDER BY room_code"
         ).fetchall()
     ]
 
@@ -583,6 +599,8 @@ def automate_timetable(
     # Group sections by shift (Morning vs Afternoon run on different clock times)
     classrooms = [r for r in rooms if r["room_type"] == "CLASSROOM"]
     labs = [r for r in rooms if r["room_type"] == "COMPUTER_LAB"]
+    moot_courts = [r for r in rooms if r["room_type"] == "MOOT_COURT"]
+    auditoriums = [r for r in rooms if r["room_type"] in ("AUDITORIUM", "AMPHITHEATER")]
 
     def _is_room_busy(room_id: int, day: str, slot: dict[str, Any]) -> bool:
         return bool(
@@ -664,46 +682,53 @@ def automate_timetable(
             return fid
         return None
 
-    def _pick_free_lab(sec: dict[str, Any], day: str, slot: dict[str, Any]) -> dict[str, Any] | None:
-        for rm in labs:
-            if rm["capacity"] < sec["capacity"]:
-                continue
-            if not _is_room_busy(rm["id"], day, slot):
-                return rm
-        return None
-
-    def _pick_free_classroom(sec: dict[str, Any], day: str, slot: dict[str, Any]) -> dict[str, Any] | None:
+    def _pick_room_for_subject(sec: dict[str, Any], sub: dict[str, Any], day: str, slot: dict[str, Any]) -> dict[str, Any] | None:
         shift = sec["shift"]
-        # Priority 1: Section's own primary classroom
+        c_code = sec["course_code"]
         prim_id = sec.get("primary_room_id")
-        if prim_id and not _is_room_busy(prim_id, day, slot):
-            return next((r for r in classrooms if r["id"] == prim_id), None)
+        prim_room = next((r for r in rooms if r["id"] == prim_id), None) if prim_id else None
 
-        # Priority 2: Free classroom that is NOT the primary classroom of another section in this shift
-        for rm in classrooms:
-            if rm["capacity"] < sec["capacity"]:
-                continue
-            reserved_owner = primary_reservations.get((shift, rm["id"]))
-            if reserved_owner is not None and reserved_owner != sec["id"]:
-                continue  # Reserved for another section's primary room
-            if not _is_room_busy(rm["id"], day, slot):
-                return rm
+        # 1. Moot Court sessions for Law (LLB)
+        if is_moot_court_subject(sub["subject_code"], sub["subject_name"], c_code):
+            for mc in moot_courts:
+                if mc["capacity"] >= sec["capacity"] and not _is_room_busy(mc["id"], day, slot):
+                    return mc
+            return None
 
-        # Priority 3: Any free classroom
-        for rm in classrooms:
-            if rm["capacity"] >= sec["capacity"] and not _is_room_busy(rm["id"], day, slot):
-                return rm
-        return None
+        # 2. Computer / IT subjects (BCA computer subjects + other course IT practicals)
+        elif is_computer_subject(sub["subject_code"], sub["subject_name"], c_code, sub.get("requires_lab", 0)):
+            # If section's primary room is a Computer Lab (BCA), prioritize it!
+            if prim_room and prim_room["room_type"] == "COMPUTER_LAB" and not _is_room_busy(prim_room["id"], day, slot):
+                return prim_room
+            # Rotate into any free Computer Lab
+            for lb in labs:
+                if lb["capacity"] >= sec["capacity"] and not _is_room_busy(lb["id"], day, slot):
+                    return lb
+            return None
 
-    def _insert_entry(sec: dict[str, Any], sub: dict[str, Any], fac_id: int, rm: dict[str, Any], day: str, slot: dict[str, Any], is_lab: bool = False, is_primary: bool = False):
-        val_label = "Lifetime" if validity_type == "LIFETIME" else f"{effective_from}..{effective_to}"
-        if is_lab:
-            room_label = f"Computer Lab {rm['room_code']}"
-        elif is_primary:
-            room_label = f"Primary Room {rm['room_code']}"
+        # 3. Standard theory lectures (BCA Stats/Management/Yoga, BBA/MBA management theory, LLB law theory)
         else:
-            room_label = f"Classroom {rm['room_code']}"
-        reason = f"Auto-allotted [{val_label}] ({room_label})"
+            # If section's primary room is a CLASSROOM (BBA/MBA/LLB), prioritize it!
+            if prim_room and prim_room["room_type"] == "CLASSROOM" and not _is_room_busy(prim_room["id"], day, slot):
+                return prim_room
+            # If section's primary room was a Lab (BCA taking Stats/Management), move to a free classroom
+            for rm in classrooms:
+                if rm["capacity"] < sec["capacity"]:
+                    continue
+                reserved_owner = primary_reservations.get((shift, rm["id"]))
+                if reserved_owner is not None and reserved_owner != sec["id"]:
+                    continue  # Reserved for another section's primary room
+                if not _is_room_busy(rm["id"], day, slot):
+                    return rm
+            for rm in classrooms:
+                if rm["capacity"] >= sec["capacity"] and not _is_room_busy(rm["id"], day, slot):
+                    return rm
+            return None
+
+    def _insert_entry(sec: dict[str, Any], sub: dict[str, Any], fac_id: int, rm: dict[str, Any], day: str, slot: dict[str, Any]):
+        val_label = "Lifetime" if validity_type == "LIFETIME" else f"{effective_from}..{effective_to}"
+        is_primary = (rm["id"] == sec.get("primary_room_id"))
+        reason = f"Auto-allotted [{val_label}] ({rm['room_code']} - {rm['room_type']}{' Primary' if is_primary else ''})"
 
         conn.execute(
             """
@@ -750,95 +775,90 @@ def automate_timetable(
                 if not unfilled_secs:
                     continue
 
-                # --- PHASE 1: COHESIVE COMPUTER LAB ALLOCATION ---
-                # Rotate available computer labs (G04, 104, 107) across sections needing labs
-                lab_candidates = []
-                for s in unfilled_secs:
-                    s_info = sec_data[s["id"]]
-                    needed_labs = [
-                        sub for sub in s_info["lab_subjects"]
-                        if s_info["subject_counts"].get(sub["id"], 0) < sub["lectures_per_week"]
-                        and s_info["day_subjects"][day].get(sub["id"], 0) < 1
+                # Prioritize sections that need specialized venues (Moot Court first, then Computer Labs)
+                def sec_sort_priority(sec: dict[str, Any]) -> int:
+                    s_info = sec_data[sec["id"]]
+                    has_moot = any(
+                        is_moot_court_subject(sb["subject_code"], sb["subject_name"], sec["course_code"])
+                        and s_info["subject_counts"].get(sb["id"], 0) < sb["lectures_per_week"]
+                        for sb in s_info["subjects"]
+                    )
+                    if has_moot:
+                        return 0
+                    has_comp = any(
+                        is_computer_subject(sb["subject_code"], sb["subject_name"], sec["course_code"], sb.get("requires_lab", 0))
+                        and s_info["subject_counts"].get(sb["id"], 0) < sb["lectures_per_week"]
+                        for sb in s_info["subjects"]
+                    )
+                    if has_comp:
+                        return 1
+                    return 2
+
+                unfilled_secs.sort(key=sec_sort_priority)
+
+                for sec in unfilled_secs:
+                    sid = sec["id"]
+                    s_info = sec_data[sid]
+                    candidate_subs = [
+                        sb for sb in s_info["subjects"]
+                        if s_info["day_subjects"][day].get(sb["id"], 0) < 2
                     ]
-                    if needed_labs and not s_info["day_has_lab"].get(day, False):
-                        deficit = sum(sub["lectures_per_week"] - s_info["subject_counts"].get(sub["id"], 0) for sub in needed_labs)
-                        lab_candidates.append((deficit, s, needed_labs))
-
-                # Prioritize section with highest remaining lab deficit
-                lab_candidates.sort(key=lambda x: x[0], reverse=True)
-
-                assigned_in_slot: set[int] = set()
-
-                for deficit, s, needed_labs in lab_candidates:
-                    s_info = sec_data[s["id"]]
-                    needed_labs.sort(key=lambda sb: (s_info["subject_counts"].get(sb["id"], 0) - sb["lectures_per_week"], s_info["subject_counts"].get(sb["id"], 0)))
-
-                    for sub in needed_labs:
-                        fac_id = _pick_faculty(sub, s, s_info, day, slot)
-                        if fac_id is None:
-                            continue
-                        lab_rm = _pick_free_lab(s, day, slot)
-                        if lab_rm is None:
-                            continue
-
-                        _insert_entry(s, sub, fac_id, lab_rm, day, slot, is_lab=True)
-                        s_info["subject_counts"][sub["id"]] = s_info["subject_counts"].get(sub["id"], 0) + 1
-                        s_info["day_subjects"][day][sub["id"]] = s_info["day_subjects"][day].get(sub["id"], 0) + 1
-                        s_info["day_slot_faculty"][(day, s_idx)] = fac_id
-                        s_info["existing_slot_keys"].add((day, s_idx))
-                        s_info["day_has_lab"][day] = True
-                        s_info["sec_created"] += 1
-                        created_count += 1
-                        assigned_in_slot.add(s["id"])
-                        break
-
-                # --- PHASE 2: THEORY ALLOCATION IN PRIMARY CLASSROOMS ---
-                # All remaining sections take theory lectures in their primary classrooms
-                theory_secs = [s for s in unfilled_secs if s["id"] not in assigned_in_slot]
-                for s in theory_secs:
-                    s_info = sec_data[s["id"]]
-                    theory_subs = [
-                        sub for sub in s_info["theory_subjects"]
-                        if s_info["day_subjects"][day].get(sub["id"], 0) < 2
-                    ]
-                    if not theory_subs:
+                    if not candidate_subs:
                         continue
 
-                    theory_subs.sort(
-                        key=lambda sb: (
+                    # Sort candidate subjects for this section:
+                    # Prefer subjects not taught today, matching venue affinity, and furthest from weekly target
+                    def sub_sort_key(sb: dict[str, Any]):
+                        is_comp = is_computer_subject(sb["subject_code"], sb["subject_name"], sec["course_code"], sb.get("requires_lab", 0))
+                        is_moot = is_moot_court_subject(sb["subject_code"], sb["subject_name"], sec["course_code"])
+                        prim_id = sec.get("primary_room_id")
+                        prim_room = next((r for r in rooms if r["id"] == prim_id), None) if prim_id else None
+
+                        venue_match = 0
+                        if is_moot:
+                            venue_match = 0
+                        elif prim_room and prim_room["room_type"] == "COMPUTER_LAB" and is_comp:
+                            venue_match = 0
+                        elif prim_room and prim_room["room_type"] == "CLASSROOM" and not is_comp:
+                            venue_match = 0
+                        else:
+                            venue_match = 1
+
+                        return (
                             s_info["day_subjects"][day].get(sb["id"], 0),
+                            venue_match,
                             s_info["subject_counts"].get(sb["id"], 0) - sb["lectures_per_week"],
                             s_info["subject_counts"].get(sb["id"], 0),
                         )
-                    )
 
-                    placed_theory = False
-                    for sub in theory_subs:
-                        fac_id = _pick_faculty(sub, s, s_info, day, slot)
+                    candidate_subs.sort(key=sub_sort_key)
+
+                    placed = False
+                    for sub in candidate_subs:
+                        fac_id = _pick_faculty(sub, sec, s_info, day, slot)
                         if fac_id is None:
                             continue
-                        theory_rm = _pick_free_classroom(s, day, slot)
-                        if theory_rm is None:
+                        rm = _pick_room_for_subject(sec, sub, day, slot)
+                        if rm is None:
                             continue
 
-                        is_prim = (theory_rm["id"] == s.get("primary_room_id"))
-                        _insert_entry(s, sub, fac_id, theory_rm, day, slot, is_lab=False, is_primary=is_prim)
+                        _insert_entry(sec, sub, fac_id, rm, day, slot)
                         s_info["subject_counts"][sub["id"]] = s_info["subject_counts"].get(sub["id"], 0) + 1
                         s_info["day_subjects"][day][sub["id"]] = s_info["day_subjects"][day].get(sub["id"], 0) + 1
                         s_info["day_slot_faculty"][(day, s_idx)] = fac_id
                         s_info["existing_slot_keys"].add((day, s_idx))
                         s_info["sec_created"] += 1
                         created_count += 1
-                        placed_theory = True
+                        placed = True
                         break
 
-                    if not placed_theory:
+                    if not placed:
                         skipped_slots.append(
                             {
-                                "section": f"{s['course_code']} Y{s['year_number']} {s['section_code']}",
+                                "section": f"{sec['course_code']} Y{sec['year_number']} {sec['section_code']}",
                                 "day": day,
                                 "slot_index": s_idx,
-                                "reason": "No conflict-free classroom or qualified available teacher combination.",
+                                "reason": "No conflict-free room or qualified available teacher combination.",
                             }
                         )
 
@@ -891,7 +911,7 @@ def reallocate_entry(conn: sqlite3.Connection, entry_id: int) -> dict[str, Any]:
     rooms = [
         dict(r)
         for r in conn.execute(
-            "SELECT * FROM rooms WHERE status = 'ACTIVE' AND room_type NOT IN ('AMPHITHEATER', 'AUDITORIUM') ORDER BY room_code"
+            "SELECT * FROM rooms WHERE status = 'ACTIVE' ORDER BY room_code"
         ).fetchall()
     ]
     booked_rooms = {

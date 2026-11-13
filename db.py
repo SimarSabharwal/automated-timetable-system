@@ -195,7 +195,8 @@ def seed_initial_data(conn: sqlite3.Connection) -> None:
             ("306", "Main Block", "Third Floor", "CLASSROOM", 65, "ACTIVE"),
             ("307", "Main Block", "Third Floor", "CLASSROOM", 65, "ACTIVE"),
             ("308", "Main Block", "Third Floor", "CLASSROOM", 65, "ACTIVE"),
-            # Co-Curricular Venues (Excluded from regular course scheduling)
+            # Specialized Practice & Assembly Venues
+            ("MOOT-COURT", "Law Wing", "Ground Floor", "MOOT_COURT", 80, "ACTIVE"),
             ("AMPHITHEATER", "Cultural Wing", "Ground Floor", "AMPHITHEATER", 300, "ACTIVE"),
             ("AUDITORIUM", "Main Block", "Ground Floor", "AUDITORIUM", 500, "ACTIVE"),
         ]
@@ -416,6 +417,14 @@ def seed_initial_data(conn: sqlite3.Connection) -> None:
             """
         )
 
+    # Ensure MOOT-COURT venue exists in existing databases
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO rooms (room_code, building, floor, room_type, capacity, status)
+        VALUES ('MOOT-COURT', 'Law Wing', 'Ground Floor', 'MOOT_COURT', 80, 'ACTIVE')
+        """
+    )
+
     assign_default_primary_rooms(conn)
 
     conn.commit()
@@ -423,18 +432,22 @@ def seed_initial_data(conn: sqlite3.Connection) -> None:
 
 def assign_default_primary_rooms(conn: sqlite3.Connection):
     """
-    Ensure every section has a non-conflicting, dedicated standard CLASSROOM as its primary home room.
-    Labs (G04, 104, 107) and event halls (Amphitheater, Auditorium) are strictly excluded.
+    Ensure every section has an appropriately dedicated primary home room:
+    - BCA sections: dedicated Computer Labs (104, 107, G04) as their primary base.
+    - LLB sections: Law classrooms, with final-year trial advocacy having Moot Court.
+    - BBA & MBA sections: standard lecture Classrooms.
     """
-    classrooms = conn.execute(
-        "SELECT id, room_code FROM rooms WHERE room_type = 'CLASSROOM' AND status = 'ACTIVE' ORDER BY room_code"
+    all_rooms = conn.execute(
+        "SELECT id, room_code FROM rooms WHERE status = 'ACTIVE' ORDER BY room_code"
     ).fetchall()
-    room_map = {r["room_code"]: r["id"] for r in classrooms}
+    room_map = {r["room_code"]: r["id"] for r in all_rooms}
 
     primary_code_map = {
-        ("BCA", 1, "Grade-Wise"): "G01",
-        ("BCA", 2, "Grade-Wise"): "G02",
-        ("BCA", 3, "Grade-Wise"): "G03",
+        # BCA: Computer Labs as Primary Classes
+        ("BCA", 1, "Grade-Wise"): "104",
+        ("BCA", 2, "Grade-Wise"): "107",
+        ("BCA", 3, "Grade-Wise"): "G04",
+        # BBA: Dedicated lecture classrooms
         ("BBA", 1, "M1"): "101",
         ("BBA", 1, "M2"): "102",
         ("BBA", 1, "M3"): "103",
@@ -444,8 +457,10 @@ def assign_default_primary_rooms(conn: sqlite3.Connection):
         ("BBA", 3, "M1"): "201",
         ("BBA", 3, "M2"): "202",
         ("BBA", 3, "M3"): "203",
+        # MBA: Management suites
         ("MBA", 1, "M1"): "204",
         ("MBA", 1, "M2"): "205",
+        # LLB: Law classrooms & Moot Court
         ("LLB", 1, "M1"): "206",
         ("LLB", 1, "M2"): "207",
         ("LLB", 2, "M1"): "208",
@@ -454,8 +469,9 @@ def assign_default_primary_rooms(conn: sqlite3.Connection):
         ("LLB", 3, "M2"): "303",
         ("LLB", 4, "M1"): "304",
         ("LLB", 4, "M2"): "305",
-        ("LLB", 5, "M1"): "306",
-        ("LLB", 5, "M2"): "307",
+        ("LLB", 5, "M1"): "MOOT-COURT",
+        ("LLB", 5, "M2"): "306",
+        # Afternoon sections
         ("BBA", 1, "A1"): "101",
         ("BBA", 1, "A2"): "102",
         ("BBA", 1, "A3"): "103",
@@ -473,8 +489,8 @@ def assign_default_primary_rooms(conn: sqlite3.Connection):
         ("LLB", 3, "A2"): "303",
         ("LLB", 4, "A1"): "304",
         ("LLB", 4, "A2"): "305",
-        ("LLB", 5, "A1"): "306",
-        ("LLB", 5, "A2"): "307",
+        ("LLB", 5, "A1"): "MOOT-COURT",
+        ("LLB", 5, "A2"): "306",
     }
 
     sections = conn.execute(

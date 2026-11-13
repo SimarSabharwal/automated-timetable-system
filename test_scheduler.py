@@ -3,6 +3,7 @@ from pathlib import Path
 
 import db
 from app import app
+from scheduler import is_computer_subject, is_moot_court_subject
 
 
 def run_tests():
@@ -18,9 +19,10 @@ def run_tests():
 
         sections = boot["sections"]
         rooms = {r["room_code"]: r for r in boot["rooms"]}
-        assert len(rooms) == 30
+        assert len(rooms) == 31
         assert rooms["AMPHITHEATER"]["room_type"] == "AMPHITHEATER"
         assert rooms["AUDITORIUM"]["room_type"] == "AUDITORIUM"
+        assert rooms["MOOT-COURT"]["room_type"] == "MOOT_COURT"
         assert rooms["G04"]["room_type"] == "COMPUTER_LAB"
         assert rooms["104"]["room_type"] == "COMPUTER_LAB"
         assert rooms["107"]["room_type"] == "COMPUTER_LAB"
@@ -189,6 +191,7 @@ def run_tests():
         )
         assert unav_fail.status_code == 409
         assert "Availability Clause" in unav_fail.get_json()["error"]
+        client.delete(f"/api/v1/teacher-availability/{unav.get_json()['id']}")
 
         # 5. Clause 4: Holiday Calendar Exclusion (2026-11-24 is Guru Nanak Jayanti)
         holiday_fail = client.post(
@@ -249,21 +252,21 @@ def run_tests():
         assert realloc.get_json()["action"] == "ROOM_SWAPPED"
 
         # 7. Co-Curricular rough-timing booking (09:00-10:00) & Amphitheater/Auditorium rules
-        # Course cannot book AUDITORIUM
-        aud_course_fail = client.post(
+        # Course can book AUDITORIUM for guest lectures (e.g. Thursday Slot 1)
+        aud_course_ok = client.post(
             "/api/v1/timetable/manual",
             json={
                 "section_id": bba_m1["id"],
-                "day_of_week": "Wednesday",
+                "day_of_week": "Thursday",
                 "slot_index": 1,
                 "subject_id": bba_sub["id"],
                 "faculty_id": bba_sub["faculty_id"],
                 "room_id": rooms["AUDITORIUM"]["id"],
                 "validity_type": "LIFETIME",
-                "reason": "Courses cannot use Auditorium",
+                "reason": "Combined Guest Lecture in Auditorium",
             },
         )
-        assert aud_course_fail.status_code == 409
+        assert aud_course_ok.status_code == 201, aud_course_ok.get_json()
 
         # Co-Curricular can book AUDITORIUM for 09:00-10:00 on 2026-11-25 with Teacher In-Charge
         aud_ok = client.post(
@@ -465,82 +468,60 @@ def run_tests():
         assert any(e["room_code"] == "201" and e["reason"] == "ERP External API Allotment" for e in exported["timetable"])
 
         # 11. Primary Room Rules, Dedicated Rooms, and Cohesive Multi-Course Generation
-        # 11a. Primary Room must be a CLASSROOM (cannot be Computer Lab or Auditorium)
+        # 11a. Primary Room can be Computer Lab for BCA or Moot Court for Law, or Classroom for BBA
         lab_104 = rooms["104"]
-        res_bad_primary = client.post(
+        moot_court = rooms["MOOT-COURT"]
+        auditorium = rooms["AUDITORIUM"]
+
+        # BCA Year 1 can assign Computer Lab 104 as Primary Room
+        res_lab_primary = client.post(
             f"/api/v1/sections/{bca_m1['id']}/primary-room",
             json={"room_id": lab_104["id"]},
         )
-        assert res_bad_primary.status_code == 400
-        assert "Only standard CLASSROOMs can be assigned as a Primary Class" in res_bad_primary.get_json()["error"]
+        assert res_lab_primary.status_code == 200, res_lab_primary.get_json()
+        assert res_lab_primary.get_json()["primary_room_id"] == lab_104["id"]
 
-        res_good_primary = client.post(
-            f"/api/v1/sections/{bca_m1['id']}/primary-room",
-            json={"room_id": g01["id"]},
-        )
-        assert res_good_primary.status_code == 200
-        assert res_good_primary.get_json()["primary_room_id"] == g01["id"]
-
-        # Shift conflict: another Morning section cannot claim G01
+        # Shift conflict: another Morning section cannot claim Lab 104 in the same shift
         res_conflict_primary = client.post(
             f"/api/v1/sections/{bba_m1['id']}/primary-room",
-            json={"room_id": g01["id"]},
+            json={"room_id": lab_104["id"]},
         )
         assert res_conflict_primary.status_code == 400
-        assert "already assigned as the Primary Class" in res_conflict_primary.get_json()["error"]
+        assert "already assigned as the Primary" in res_conflict_primary.get_json()["error"]
 
-        # 11b. Dedicated Room Rules in Manual Allotment
-        # Theory subject into Computer Lab MUST FAIL
-        bca_theory_sub = next(s for s in boot["subjects"] if s["course_code"] == "BCA" and s["year_number"] == 1 and not s["requires_lab"])
-        theory_in_lab = client.post(
+        # 11b. Flexible Allotment & Real-World College Venues
+        # BCA computer theory subject into Computer Lab SUCCEEDS (students have PCs in front of them)
+        bca_comp_sub = next(s for s in boot["subjects"] if s["course_code"] == "BCA" and s["year_number"] == 1 and is_computer_subject(s["subject_code"], s["subject_name"], "BCA", s["requires_lab"]))
+        comp_in_lab = client.post(
             "/api/v1/timetable/manual",
             json={
                 "section_id": bca_m1["id"],
                 "day_of_week": "Friday",
                 "slot_index": 3,
-                "subject_id": bca_theory_sub["id"],
-                "faculty_id": bca_theory_sub["faculty_id"],
+                "subject_id": bca_comp_sub["id"],
+                "faculty_id": bca_comp_sub["faculty_id"],
                 "room_id": lab_104["id"],
                 "validity_type": "LIFETIME",
-                "reason": "Test theory in lab rejection",
+                "reason": "BCA Computer Theory in Lab",
             },
         )
-        assert theory_in_lab.status_code == 409
-        assert any("theory subject and must be assigned to a standard CLASSROOM" in c for c in theory_in_lab.get_json()["conflicts"])
+        assert comp_in_lab.status_code == 201, comp_in_lab.get_json()
 
-        # Lab subject into Classroom MUST FAIL
-        bba_lab_sub = next(s for s in boot["subjects"] if s["subject_code"] == "LAB-IT")
-        lab_in_classroom = client.post(
+        # Regular course can also book Auditorium for combined guest lecture / seminar
+        guest_in_auditorium = client.post(
             "/api/v1/timetable/manual",
             json={
                 "section_id": bba_m1["id"],
                 "day_of_week": "Friday",
-                "slot_index": 3,
-                "subject_id": bba_lab_sub["id"],
-                "faculty_id": bba_lab_sub["faculty_id"],
-                "room_id": g01["id"],
+                "slot_index": 4,
+                "subject_id": bba_sub["id"],
+                "faculty_id": bba_sub["faculty_id"],
+                "room_id": auditorium["id"],
                 "validity_type": "LIFETIME",
-                "reason": "Test lab in classroom rejection",
+                "reason": "Combined Guest Lecture in Auditorium",
             },
         )
-        assert lab_in_classroom.status_code == 409
-        assert any("requires a dedicated COMPUTER_LAB" in c for c in lab_in_classroom.get_json()["conflicts"])
-
-        # Lab subject into Computer Lab MUST SUCCEED
-        lab_in_lab = client.post(
-            "/api/v1/timetable/manual",
-            json={
-                "section_id": bba_m1["id"],
-                "day_of_week": "Friday",
-                "slot_index": 3,
-                "subject_id": bba_lab_sub["id"],
-                "faculty_id": bba_lab_sub["faculty_id"],
-                "room_id": lab_104["id"],
-                "validity_type": "LIFETIME",
-                "reason": "Test valid lab allotment",
-            },
-        )
-        assert lab_in_lab.status_code == 201, lab_in_lab.get_json()
+        assert guest_in_auditorium.status_code == 201, guest_in_auditorium.get_json()
 
         # 11c. Cohesive Multi-Course Generation across ALL courses at the same time
         all_auto_res = client.post(
@@ -555,11 +536,16 @@ def run_tests():
         assert all_auto_res.get_json()["created_count"] > 100
 
         all_tt = client.get("/api/v1/timetable").get_json()["entries"]
-        # Verify room dedication invariants across entire schedule
+        # Verify venue suitability invariants across entire schedule
         for entry in all_tt:
             if entry["allocation_category"] == "COURSE":
-                if entry["requires_lab"]:
-                    assert entry["room_type"] == "COMPUTER_LAB", f"Lab subject {entry['subject_name']} assigned to non-lab room {entry['room_code']}"
+                if entry["assignment_mode"] == "MANUAL" and entry["room_type"] in ("AUDITORIUM", "AMPHITHEATER"):
+                    continue
+                c_code = entry.get("course_code", "")
+                if is_moot_court_subject(entry["subject_code"], entry["subject_name"], c_code):
+                    assert entry["room_type"] == "MOOT_COURT", f"Moot court subject {entry['subject_name']} assigned to {entry['room_type']}"
+                elif is_computer_subject(entry["subject_code"], entry["subject_name"], c_code, entry["requires_lab"]):
+                    assert entry["room_type"] == "COMPUTER_LAB", f"Computer subject {entry['subject_name']} assigned to non-lab room {entry['room_code']}"
                 else:
                     assert entry["room_type"] == "CLASSROOM", f"Theory subject {entry['subject_name']} assigned to non-classroom {entry['room_code']}"
 
