@@ -1,0 +1,849 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>College ERP — Smart Timetable & Room Master</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-badge">ERP</div>
+      <div>
+        <h1>Smart Timetable &amp; Room Allotment Module</h1>
+        <p class="subtitle">Lifetime &amp; Dated Scheduling • Student System Clauses • Room Master</p>
+      </div>
+    </div>
+    <div class="role-switcher" role="group" aria-label="Role Panel Switcher">
+      <button class="role-btn active" data-role="admin">Admin Panel</button>
+      <button class="role-btn" data-role="teacher">Teacher Panel</button>
+      <button class="role-btn" data-role="student">Student Panel</button>
+    </div>
+  </header>
+
+  <div id="admin-subnav" class="subnav-bar">
+    <nav class="nav-tabs" role="tablist">
+      <button class="nav-tab active" data-tab="timetable-tab">Timetable &amp; Allotment</button>
+      <button class="nav-tab" data-tab="rooms-tab">Room Master &amp; Live Status</button>
+      <button class="nav-tab" data-tab="clauses-tab">Teacher Clauses &amp; Calendar</button>
+      <button class="nav-tab" data-tab="curriculum-tab">Course &amp; Subject Setup</button>
+    </nav>
+  </div>
+
+  <main class="container">
+    <div id="alert-banner" class="alert hidden" role="alert"></div>
+
+    <div id="admin-panel" class="role-panel">
+
+    <!-- TAB 1: TIMETABLE & ALLOTMENT -->
+    <section id="timetable-tab" class="tab-panel active">
+      <div class="card context-bar">
+        <div class="context-grid">
+          <div class="field">
+            <label for="sel-course">Course</label>
+            <select id="sel-course"></select>
+          </div>
+          <div class="field">
+            <label for="sel-year">Year</label>
+            <select id="sel-year"></select>
+          </div>
+          <div class="field">
+            <label for="sel-shift">Shift</label>
+            <select id="sel-shift"></select>
+          </div>
+          <div class="field" id="field-section">
+            <label for="sel-section">Section</label>
+            <select id="sel-section"></select>
+          </div>
+          <div class="field primary-room-field">
+            <label for="sel-primary-room">Primary Class (Home Room)</label>
+            <div class="inline-group">
+              <select id="sel-primary-room"></select>
+              <button id="btn-save-primary" class="btn btn-secondary" title="Save Primary Room for this section">Set</button>
+            </div>
+          </div>
+        </div>
+        <div id="course-meta-strip" class="meta-strip"></div>
+      </div>
+
+      <div class="workspace-split">
+        <div class="card control-panel">
+          <div class="mode-switch mode-switch-3">
+            <button id="mode-manual-btn" class="mode-btn active" data-mode="manual">Self-Assigned</button>
+            <button id="mode-auto-btn" class="mode-btn" data-mode="auto">Automation</button>
+            <button id="mode-cocurr-btn" class="mode-btn" data-mode="cocurr">Co-Curricular</button>
+          </div>
+
+          <!-- Manual / Self-Assigned Form (Courses Only) -->
+          <form id="manual-form" class="mode-body">
+            <p class="helper-text">
+              Allot a room &amp; subject for a course lecture slot (Lifetime or Dated). Amphitheater &amp; Auditorium are excluded from courses.
+            </p>
+            <div class="form-grid-2">
+              <div class="field">
+                <label for="man-day">Day</label>
+                <select id="man-day"></select>
+              </div>
+              <div class="field">
+                <label for="man-slot">Lecture Slot</label>
+                <select id="man-slot"></select>
+              </div>
+            </div>
+
+            <!-- Lifetime vs Dated Toggle -->
+            <div class="field">
+              <label for="man-validity">Validity / Duration</label>
+              <select id="man-validity">
+                <option value="LIFETIME">Lifetime (Permanent / Ongoing)</option>
+                <option value="DATED">Specific Date / Date Range</option>
+              </select>
+            </div>
+            <div id="man-date-row" class="form-grid-2 hidden">
+              <div class="field">
+                <label for="man-from">Effective From</label>
+                <input id="man-from" type="date" />
+              </div>
+              <div class="field">
+                <label for="man-to">Effective To</label>
+                <input id="man-to" type="date" />
+              </div>
+            </div>
+
+            <div id="man-subject-field" class="field">
+              <label for="man-subject">Subject</label>
+              <select id="man-subject"></select>
+            </div>
+
+            <div class="form-grid-2">
+              <div class="field">
+                <label id="man-faculty-label" for="man-faculty">Faculty (Qualified Only)</label>
+                <select id="man-faculty"></select>
+              </div>
+              <div class="field">
+                <label for="man-room">Room (Live Status)</label>
+                <select id="man-room"></select>
+              </div>
+            </div>
+
+            <div id="room-status-hint" class="room-hint"></div>
+
+            <div class="field">
+              <label for="man-reason">Allotment Reason <span class="req">*</span></label>
+              <input id="man-reason" type="text" placeholder="e.g. Primary class / Club practice / Cultural rehearsal" required />
+              <div class="chip-row">
+                <button type="button" class="chip" data-reason="Primary classroom allotment">Primary classroom</button>
+                <button type="button" class="chip" data-reason="Club / Society weekly meeting">Club meeting</button>
+                <button type="button" class="chip" data-reason="Extracurricular / Cultural practice">Extracurricular</button>
+                <button type="button" class="chip" data-reason="Makeup / Remedial lecture">Makeup lecture</button>
+              </div>
+            </div>
+
+            <button type="submit" class="btn btn-primary full-width">Allot Slot (Self-Assigned)</button>
+          </form>
+
+          <!-- Automation Form -->
+          <form id="auto-form" class="mode-body hidden">
+            <p class="helper-text">
+              Smart Automation respects Lifetime &amp; Dated bookings, Teacher Qualifications, Unavailability Windows, and Max Daily Workload.
+            </p>
+
+            <div class="field">
+              <label for="auto-scope">Automation Scope</label>
+              <select id="auto-scope">
+                <option value="section">Selected Section Only</option>
+                <option value="year">All Sections of Selected Course &amp; Year</option>
+                <option value="course">Entire Selected Course (All Years &amp; Shifts)</option>
+              </select>
+            </div>
+
+            <div class="field">
+              <label for="auto-validity">Schedule Validity</label>
+              <select id="auto-validity">
+                <option value="LIFETIME">Lifetime (Permanent Timetable)</option>
+                <option value="DATED">Dated Semester / Effective Range</option>
+              </select>
+            </div>
+            <div id="auto-date-row" class="form-grid-2 hidden">
+              <div class="field">
+                <label for="auto-from">Effective From</label>
+                <input id="auto-from" type="date" />
+              </div>
+              <div class="field">
+                <label for="auto-to">Effective To</label>
+                <input id="auto-to" type="date" />
+              </div>
+            </div>
+
+            <div class="field">
+              <label>Working Days</label>
+              <div class="weekday-checks">
+                <label><input type="checkbox" name="auto-day" value="Monday" checked /> Mon</label>
+                <label><input type="checkbox" name="auto-day" value="Tuesday" checked /> Tue</label>
+                <label><input type="checkbox" name="auto-day" value="Wednesday" checked /> Wed</label>
+                <label><input type="checkbox" name="auto-day" value="Thursday" checked /> Thu</label>
+                <label><input type="checkbox" name="auto-day" value="Friday" checked /> Fri</label>
+                <label><input type="checkbox" name="auto-day" value="Saturday" /> Sat</label>
+              </div>
+            </div>
+
+            <div class="form-grid-2">
+              <div class="field">
+                <label for="auto-m-start">Morning Start</label>
+                <input id="auto-m-start" type="time" value="09:10" />
+              </div>
+              <div class="field">
+                <label for="auto-m-dur">Morning Lec (min)</label>
+                <input id="auto-m-dur" type="number" value="55" min="30" max="90" />
+              </div>
+              <div class="field">
+                <label for="auto-a-start">Afternoon Start</label>
+                <input id="auto-a-start" type="time" value="13:30" />
+              </div>
+              <div class="field">
+                <label for="auto-a-dur">Afternoon Lec (min)</label>
+                <input id="auto-a-dur" type="number" value="40" min="30" max="90" />
+              </div>
+            </div>
+
+            <label class="checkbox-row">
+              <input id="auto-overwrite" type="checkbox" checked />
+              Replace previous Auto-generated slots (keep Manual slots)
+            </label>
+
+            <div class="btn-stack">
+              <button type="submit" class="btn btn-primary full-width">Run Smart Automation</button>
+              <button type="button" id="btn-clear-section" class="btn btn-danger-outline full-width">Clear Selected Section Timetable</button>
+            </div>
+
+            <div id="auto-result" class="auto-result hidden"></div>
+          </form>
+
+          <!-- Co-Curricular Assignment Form (No Course / No Lecture Slots / Rough Timing / Amphitheater & Auditorium) -->
+          <form id="cocurricular-form" class="mode-body hidden">
+            <p class="helper-text">
+              Assign venues (including <strong>Amphitheater</strong> &amp; <strong>Auditorium</strong>) for societies, clubs, or co-curricular events using rough custom timings. Not tied to any course.
+            </p>
+
+            <div class="form-grid-2">
+              <div class="field">
+                <label for="co-validity">Date / Validity</label>
+                <select id="co-validity">
+                  <option value="DATED">Specific Date / Range</option>
+                  <option value="LIFETIME">Lifetime (Weekly)</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="co-day">Day</label>
+                <select id="co-day"></select>
+              </div>
+            </div>
+
+            <div id="co-date-row" class="form-grid-2">
+              <div class="field">
+                <label for="co-from">From Date <span class="req">*</span></label>
+                <input id="co-from" type="date" required />
+              </div>
+              <div class="field">
+                <label for="co-to">To Date</label>
+                <input id="co-to" type="date" />
+              </div>
+            </div>
+
+            <div class="form-grid-2">
+              <div class="field">
+                <label for="co-start">From Time <span class="req">*</span></label>
+                <input id="co-start" type="time" value="09:00" required />
+              </div>
+              <div class="field">
+                <label for="co-end">To Time <span class="req">*</span></label>
+                <input id="co-end" type="time" value="10:00" required />
+              </div>
+            </div>
+            <div class="chip-row" style="margin-top:-6px;margin-bottom:12px;">
+              <button type="button" class="chip" data-co-time="09:00|10:00">9:00–10:00</button>
+              <button type="button" class="chip" data-co-time="11:00|12:00">11:00–12:00</button>
+              <button type="button" class="chip" data-co-time="14:00|16:00">2:00–4:00 PM</button>
+            </div>
+
+            <div class="field">
+              <label for="co-room">Venue / Room (Includes Amphitheater &amp; Auditorium)</label>
+              <select id="co-room"></select>
+            </div>
+            <div id="co-room-hint" class="room-hint"></div>
+
+            <div class="field">
+              <label for="co-faculty">Teacher In-Charge (Optional)</label>
+              <select id="co-faculty"></select>
+            </div>
+
+            <div class="field">
+              <label for="co-reason">Society Name / Event Reason <span class="req">*</span></label>
+              <input id="co-reason" type="text" placeholder="e.g. Dramatics Society — Street Play Practice" required />
+            </div>
+
+            <button type="submit" class="btn btn-primary full-width">Book Venue (Co-Curricular)</button>
+          </form>
+        </div>
+
+        <!-- Weekly Timetable Grid -->
+        <div class="card grid-panel">
+          <div class="panel-header">
+            <div>
+              <h2 id="grid-title">Weekly Timetable</h2>
+              <p id="grid-subtitle" class="muted"></p>
+            </div>
+            <div class="grid-controls">
+              <div class="inline-group">
+                <input id="grid-date-filter" type="date" title="Filter grid by specific date (leave empty for all)" />
+                <button id="btn-clear-grid-date" class="btn btn-secondary btn-sm" title="Show all Lifetime + Dated">All Dates</button>
+              </div>
+              <div class="legend">
+                <span class="badge badge-manual">Self-Assigned</span>
+                <span class="badge badge-auto">Automated</span>
+              </div>
+            </div>
+          </div>
+          <div class="table-scroll">
+            <table class="timetable-grid" id="timetable-grid">
+              <thead></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Bottom Master Allotment & Room Booking Table -->
+      <div class="card master-table-card">
+        <div class="panel-header">
+          <div>
+            <h2>Master Allotment &amp; Room Booking Ledger</h2>
+            <p class="muted">Complete record of all Self-Assigned &amp; Automated allotments (Lifetime &amp; Dated) across BCA, BBA, MBA, and LLB.</p>
+          </div>
+          <div class="table-filters">
+            <select id="filter-course">
+              <option value="">All Courses</option>
+            </select>
+            <select id="filter-room">
+              <option value="">All Rooms</option>
+            </select>
+            <select id="filter-mode">
+              <option value="">All Modes</option>
+              <option value="MANUAL">Self-Assigned</option>
+              <option value="AUTO">Automated</option>
+            </select>
+            <select id="filter-validity">
+              <option value="">All Validity</option>
+              <option value="LIFETIME">Lifetime</option>
+              <option value="DATED">Dated</option>
+            </select>
+            <input id="filter-search" type="search" placeholder="Search subject, faculty, reason..." />
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table class="data-table" id="master-table">
+            <thead>
+              <tr>
+                <th>Course</th>
+                <th>Year</th>
+                <th>Shift</th>
+                <th>Sec</th>
+                <th>Day</th>
+                <th>Time Slot</th>
+                <th>Validity / Dates</th>
+                <th>Subject</th>
+                <th>Faculty</th>
+                <th>Room</th>
+                <th>Mode</th>
+                <th>Reason / Notes</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 2: ROOM MASTER -->
+    <section id="rooms-tab" class="tab-panel">
+      <div class="two-col">
+        <div class="card">
+          <h2>Add New Room to Building Master</h2>
+          <form id="add-room-form" class="mode-body">
+            <div class="form-grid-2">
+              <div class="field">
+                <label for="rm-code">Room Code <span class="req">*</span></label>
+                <input id="rm-code" type="text" placeholder="e.g. G05, 301, LAB-3" required />
+              </div>
+              <div class="field">
+                <label for="rm-type">Room Type</label>
+                <select id="rm-type">
+                  <option value="CLASSROOM">Classroom</option>
+                  <option value="COMPUTER_LAB">Computer Lab</option>
+                  <option value="MOOT_COURT">Moot Court</option>
+                  <option value="SEMINAR_HALL">Seminar Hall</option>
+                  <option value="AMPHITHEATER">Amphitheater (Co-Curricular Only)</option>
+                  <option value="AUDITORIUM">Auditorium (Co-Curricular Only)</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="rm-building">Building / Block</label>
+                <input id="rm-building" type="text" value="Main Block" />
+              </div>
+              <div class="field">
+                <label for="rm-floor">Floor</label>
+                <input id="rm-floor" type="text" value="Ground Floor" />
+              </div>
+              <div class="field">
+                <label for="rm-cap">Seating Capacity</label>
+                <input id="rm-cap" type="number" value="65" min="10" max="500" />
+              </div>
+            </div>
+            <button type="submit" class="btn btn-primary">Add Room</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2>Live Room Occupancy Inspector</h2>
+          <p class="muted">Check FREE vs BOOKED rooms at any Day, Shift, Slot &amp; optional Date.</p>
+          <div class="form-grid-2">
+            <div class="field">
+              <label for="insp-day">Day</label>
+              <select id="insp-day"></select>
+            </div>
+            <div class="field">
+              <label for="insp-shift">Shift</label>
+              <select id="insp-shift">
+                <option value="MORNING">MORNING</option>
+                <option value="AFTERNOON">AFTERNOON</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="insp-slot">Slot</label>
+              <select id="insp-slot">
+                <option value="1">Slot 1</option>
+                <option value="2">Slot 2</option>
+                <option value="3">Slot 3</option>
+                <option value="4">Slot 4</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="insp-date">Target Date (Optional)</label>
+              <input id="insp-date" type="date" />
+            </div>
+          </div>
+          <div id="room-inspector-grid" class="room-cards-grid"></div>
+        </div>
+      </div>
+
+      <div class="card master-table-card">
+        <h2>Building Room Master Directory</h2>
+        <div class="table-scroll">
+          <table class="data-table" id="rooms-table">
+            <thead>
+              <tr>
+                <th>Room Code</th>
+                <th>Building</th>
+                <th>Floor</th>
+                <th>Type</th>
+                <th>Capacity</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 3: TEACHER CLAUSES & CALENDAR -->
+    <section id="clauses-tab" class="tab-panel">
+      <div class="two-col">
+        <div class="card">
+          <h2>Teacher Unavailability Window (Clause 2)</h2>
+          <p class="muted" style="margin-bottom:10px;">Mark a teacher unavailable for a date range. Automation &amp; manual allotment will block/skip them.</p>
+          <form id="add-unavail-form" class="mode-body">
+            <div class="form-grid-2">
+              <div class="field">
+                <label for="unav-faculty">Faculty</label>
+                <select id="unav-faculty"></select>
+              </div>
+              <div class="field">
+                <label for="unav-shift">Shift</label>
+                <select id="unav-shift">
+                  <option value="ALL">ALL SHIFTS</option>
+                  <option value="MORNING">MORNING</option>
+                  <option value="AFTERNOON">AFTERNOON</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="unav-from">From Date</label>
+                <input id="unav-from" type="date" required />
+              </div>
+              <div class="field">
+                <label for="unav-to">To Date</label>
+                <input id="unav-to" type="date" required />
+              </div>
+            </div>
+            <div class="field">
+              <label for="unav-reason">Reason</label>
+              <input id="unav-reason" type="text" placeholder="e.g. Medical leave / Academic conference" required />
+            </div>
+            <button type="submit" class="btn btn-primary">Mark Teacher Unavailable</button>
+          </form>
+
+          <div class="table-scroll" style="margin-top:14px;">
+            <table class="data-table" id="unavail-table">
+              <thead>
+                <tr>
+                  <th>Faculty</th>
+                  <th>Dates</th>
+                  <th>Shift</th>
+                  <th>Reason</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Holiday &amp; Exam Calendar Exclusions (Clause 4)</h2>
+          <p class="muted" style="margin-bottom:10px;">Dated allotments inside Holidays/Exams are blocked; Automation reports excluded dates.</p>
+          <form id="add-event-form" class="mode-body">
+            <div class="form-grid-2">
+              <div class="field">
+                <label for="ev-type">Event Type</label>
+                <select id="ev-type">
+                  <option value="HOLIDAY">HOLIDAY</option>
+                  <option value="EXAM">EXAM</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="ev-title">Title</label>
+                <input id="ev-title" type="text" placeholder="e.g. Diwali Break / Mid-Sem Exam" required />
+              </div>
+              <div class="field">
+                <label for="ev-from">Start Date</label>
+                <input id="ev-from" type="date" required />
+              </div>
+              <div class="field">
+                <label for="ev-to">End Date</label>
+                <input id="ev-to" type="date" required />
+              </div>
+            </div>
+            <button type="submit" class="btn btn-secondary">Add Calendar Event</button>
+          </form>
+
+          <div class="table-scroll" style="margin-top:14px;">
+            <table class="data-table" id="events-table">
+              <thead>
+                <tr>
+                  <th>Type</th>
+                  <th>Title</th>
+                  <th>Dates</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="card master-table-card">
+        <div class="panel-header">
+          <div>
+            <h2>Teacher Qualification Lock (Clause 1 — No Generic Substitutes)</h2>
+            <p class="muted">Only faculty mapped to a subject below can be allotted or dynamically reallocated to teach it.</p>
+          </div>
+          <form id="add-qual-form" class="table-filters">
+            <select id="qual-faculty"></select>
+            <select id="qual-subject"></select>
+            <button type="submit" class="btn btn-primary btn-sm">Add Qualification</button>
+          </form>
+        </div>
+        <div class="table-scroll">
+          <table class="data-table" id="qual-table">
+            <thead>
+              <tr>
+                <th>Faculty</th>
+                <th>Course &amp; Year</th>
+                <th>Subject Code</th>
+                <th>Subject Name</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 4: COURSE & SUBJECT SETUP -->
+    <section id="curriculum-tab" class="tab-panel">
+      <div class="two-col">
+        <div class="card">
+          <h2>Add Subject to Course &amp; Year</h2>
+          <form id="add-subject-form" class="mode-body">
+            <div class="form-grid-2">
+              <div class="field">
+                <label for="sub-course">Course</label>
+                <select id="sub-course"></select>
+              </div>
+              <div class="field">
+                <label for="sub-year">Year</label>
+                <select id="sub-year"></select>
+              </div>
+              <div class="field">
+                <label for="sub-code">Subject Code <span class="req">*</span></label>
+                <input id="sub-code" type="text" placeholder="e.g. BCA-204" required />
+              </div>
+              <div class="field">
+                <label for="sub-name">Subject Name <span class="req">*</span></label>
+                <input id="sub-name" type="text" placeholder="e.g. Database Management Systems" required />
+              </div>
+              <div class="field">
+                <label for="sub-faculty">Default Faculty</label>
+                <select id="sub-faculty"></select>
+              </div>
+              <div class="field">
+                <label for="sub-lpw">Lectures / Week</label>
+                <input id="sub-lpw" type="number" value="4" min="1" max="10" />
+              </div>
+            </div>
+            <label class="checkbox-row">
+              <input id="sub-lab" type="checkbox" />
+              Requires Computer Lab (only allots COMPUTER_LAB rooms)
+            </label>
+            <button type="submit" class="btn btn-primary">Add Subject</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2>Add Faculty Member</h2>
+          <form id="add-faculty-form" class="mode-body">
+            <div class="form-grid-2">
+              <div class="field">
+                <label for="fac-code">Faculty Code <span class="req">*</span></label>
+                <input id="fac-code" type="text" placeholder="e.g. SKM" required />
+              </div>
+              <div class="field">
+                <label for="fac-dept">Department</label>
+                <input id="fac-dept" type="text" value="Computer Science" />
+              </div>
+              <div class="field">
+                <label for="fac-name">Full Name <span class="req">*</span></label>
+                <input id="fac-name" type="text" placeholder="e.g. Dr. Suresh Kumar Mishra" required />
+              </div>
+              <div class="field">
+                <label for="fac-max">Max Lectures / Day</label>
+                <input id="fac-max" type="number" value="4" min="1" max="8" />
+              </div>
+            </div>
+            <button type="submit" class="btn btn-secondary">Add Faculty</button>
+          </form>
+        </div>
+      </div>
+
+      <div class="card master-table-card">
+        <div class="panel-header">
+          <div>
+            <h2>Course Curriculum &amp; Subjects</h2>
+            <p class="muted">Filter by course and year to inspect or manage subjects.</p>
+          </div>
+          <div class="table-filters">
+            <select id="curr-filter-course"></select>
+            <select id="curr-filter-year"></select>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table class="data-table" id="subjects-table">
+            <thead>
+              <tr>
+                <th>Course</th>
+                <th>Year</th>
+                <th>Code</th>
+                <th>Subject Name</th>
+                <th>Type</th>
+                <th>Lectures/Wk</th>
+                <th>Assigned Faculty</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+    </div> <!-- /admin-panel -->
+
+    <!-- TEACHER PANEL -->
+    <section id="teacher-panel" class="role-panel hidden">
+      <div class="card context-bar">
+        <div class="two-col" style="align-items:end;">
+          <div class="field" style="margin-bottom:0;">
+            <label for="tp-faculty">Sign In / View As Teacher</label>
+            <select id="tp-faculty"></select>
+          </div>
+          <div id="tp-meta-strip" class="meta-strip" style="margin-top:0;border-top:none;padding-top:0;"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="panel-header">
+          <div>
+            <h2 id="tp-title">Teacher Weekly Schedule</h2>
+            <p class="muted">Live view of all classes &amp; club activities assigned to you by Admin.</p>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table class="timetable-grid" id="tp-grid">
+            <thead></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="two-col">
+        <div class="card">
+          <h2>My Assigned Lectures &amp; Clubs</h2>
+          <div class="table-scroll" style="margin-top:10px;">
+            <table class="data-table" id="tp-table">
+              <thead>
+                <tr>
+                  <th>Day</th>
+                  <th>Shift &amp; Slot</th>
+                  <th>Class / Club</th>
+                  <th>Subject</th>
+                  <th>Room</th>
+                  <th>Validity</th>
+                  <th>Reason</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Mark Self Unavailable</h2>
+          <p class="muted" style="margin-bottom:10px;">Report leave/unavailability so Admin &amp; Automation know not to book you.</p>
+          <form id="tp-unavail-form" class="mode-body">
+            <div class="form-grid-2">
+              <div class="field">
+                <label for="tp-unav-from">From Date</label>
+                <input id="tp-unav-from" type="date" required />
+              </div>
+              <div class="field">
+                <label for="tp-unav-to">To Date</label>
+                <input id="tp-unav-to" type="date" required />
+              </div>
+            </div>
+            <div class="form-grid-2">
+              <div class="field">
+                <label for="tp-unav-shift">Shift</label>
+                <select id="tp-unav-shift">
+                  <option value="ALL">ALL SHIFTS</option>
+                  <option value="MORNING">MORNING</option>
+                  <option value="AFTERNOON">AFTERNOON</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="tp-unav-reason">Reason</label>
+                <input id="tp-unav-reason" type="text" placeholder="e.g. Medical leave / Seminar" required />
+              </div>
+            </div>
+            <button type="submit" class="btn btn-primary">Submit Unavailability</button>
+          </form>
+        </div>
+      </div>
+    </section>
+
+    <!-- STUDENT PANEL -->
+    <section id="student-panel" class="role-panel hidden">
+      <div class="card context-bar">
+        <div class="context-grid">
+          <div class="field">
+            <label for="sp-course">Course</label>
+            <select id="sp-course"></select>
+          </div>
+          <div class="field">
+            <label for="sp-year">Year</label>
+            <select id="sp-year"></select>
+          </div>
+          <div class="field">
+            <label for="sp-shift">Shift</label>
+            <select id="sp-shift"></select>
+          </div>
+          <div class="field" id="sp-field-section">
+            <label for="sp-section">Section</label>
+            <select id="sp-section"></select>
+          </div>
+          <div class="field">
+            <label for="sp-student">Sign In / Select Student (30/Class)</label>
+            <select id="sp-student"></select>
+          </div>
+        </div>
+        <div id="sp-meta-strip" class="meta-strip"></div>
+      </div>
+
+      <div class="card">
+        <div class="panel-header">
+          <div>
+            <h2 id="sp-title">My Class Timetable</h2>
+            <p id="sp-subtitle" class="muted">Live schedule allotted to your class by Admin.</p>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table class="timetable-grid" id="sp-grid">
+            <thead></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="two-col">
+        <div class="card">
+          <h2>Class Roster (30 Students in This Class)</h2>
+          <div class="table-scroll" style="margin-top:10px;max-height:340px;overflow-y:auto;">
+            <table class="data-table" id="sp-roster-table">
+              <thead>
+                <tr>
+                  <th>Roll #</th>
+                  <th>ERP ID</th>
+                  <th>Student Name</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Campus Clubs &amp; Extracurricular Room Schedule</h2>
+          <div class="table-scroll" style="margin-top:10px;max-height:340px;overflow-y:auto;">
+            <table class="data-table" id="sp-clubs-table">
+              <thead>
+                <tr>
+                  <th>Activity / Club</th>
+                  <th>Day &amp; Shift</th>
+                  <th>Slot</th>
+                  <th>Room</th>
+                  <th>Validity</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>
