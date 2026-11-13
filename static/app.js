@@ -831,25 +831,31 @@ $("cocurricular-form").addEventListener("submit", async (e) => {
   }
 });
 
-$("auto-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
+function getAutomationScopeSectionIds() {
   const course = getSelectedCourse();
   const sec = getSelectedSection();
   const year = Number($("sel-year").value);
   const scope = $("auto-scope").value;
 
-  let sectionIds = [];
   if (scope === "section" && sec) {
-    sectionIds = [sec.id];
-  } else if (scope === "year" && course) {
-    sectionIds = state.sections
+    return [sec.id];
+  }
+  if (scope === "year" && course) {
+    return state.sections
       .filter((s) => s.course_id === course.id && s.year_number === year)
       .map((s) => s.id);
-  } else if (scope === "course" && course) {
-    sectionIds = state.sections
+  }
+  if (scope === "course" && course) {
+    return state.sections
       .filter((s) => s.course_id === course.id)
       .map((s) => s.id);
   }
+  return [];
+}
+
+$("auto-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const sectionIds = getAutomationScopeSectionIds();
 
   const weekdays = Array.from(document.querySelectorAll('input[name="auto-day"]:checked')).map(
     (cb) => cb.value
@@ -903,6 +909,55 @@ $("auto-form").addEventListener("submit", async (e) => {
   }
 });
 
+$("btn-reset-auto").addEventListener("click", async () => {
+  const sectionIds = getAutomationScopeSectionIds();
+  if (!sectionIds.length) return;
+  try {
+    const res = await api("/api/v1/timetable/clear", {
+      method: "POST",
+      body: JSON.stringify({ section_ids: sectionIds, mode: "AUTO" }),
+    });
+    $("auto-result").classList.add("hidden");
+    showAlert(`Reset ${res.deleted_count ?? 0} auto-generated slot(s) in selected scope (Self-Assigned slots kept).`);
+    await loadAll();
+  } catch (err) {
+    showAlert(err.message, "error");
+  }
+});
+
+async function resetAllAutoTimetables() {
+  try {
+    const res = await api("/api/v1/timetable/clear", {
+      method: "POST",
+      body: JSON.stringify({ mode: "AUTO" }),
+    });
+    $("auto-result").classList.add("hidden");
+    showAlert(`Reset all ${res.deleted_count ?? 0} auto-generated timetable slot(s) across all courses.`);
+    await loadAll();
+  } catch (err) {
+    showAlert(err.message, "error");
+  }
+}
+
+$("btn-reset-all-auto").addEventListener("click", resetAllAutoTimetables);
+$("btn-master-reset-auto").addEventListener("click", resetAllAutoTimetables);
+
+$("btn-grid-reset-auto").addEventListener("click", async () => {
+  const sec = getSelectedSection();
+  if (!sec) return;
+  try {
+    const res = await api("/api/v1/timetable/clear", {
+      method: "POST",
+      body: JSON.stringify({ section_id: sec.id, mode: "AUTO" }),
+    });
+    $("auto-result").classList.add("hidden");
+    showAlert(`Removed ${res.deleted_count ?? 0} auto-generated slot(s) for this section.`);
+    await loadAll();
+  } catch (err) {
+    showAlert(err.message, "error");
+  }
+});
+
 $("btn-clear-section").addEventListener("click", async () => {
   const sec = getSelectedSection();
   if (!sec) return;
@@ -910,6 +965,7 @@ $("btn-clear-section").addEventListener("click", async () => {
     method: "POST",
     body: JSON.stringify({ section_id: sec.id, mode: "ALL" }),
   });
+  $("auto-result").classList.add("hidden");
   showAlert("Section timetable cleared.");
   await loadAll();
 });

@@ -213,7 +213,9 @@
 
             <div class="btn-stack">
               <button type="submit" class="btn btn-primary full-width">Run Smart Automation</button>
-              <button type="button" id="btn-clear-section" class="btn btn-danger-outline full-width">Clear Selected Section Timetable</button>
+              <button type="button" id="btn-reset-auto" class="btn btn-danger-outline full-width">Reset Auto-Generated Timetable (Selected Scope)</button>
+              <button type="button" id="btn-reset-all-auto" class="btn btn-danger-outline full-width">Reset All Auto-Generated Timetables</button>
+              <button type="button" id="btn-clear-section" class="btn btn-secondary full-width">Clear Entire Selected Section (Auto + Manual)</button>
             </div>
 
             <div id="auto-result" class="auto-result hidden"></div>
@@ -297,6 +299,7 @@
               <div class="inline-group">
                 <input id="grid-date-filter" type="date" title="Filter grid by specific date (leave empty for all)" />
                 <button id="btn-clear-grid-date" class="btn btn-secondary btn-sm" title="Show all Lifetime + Dated">All Dates</button>
+                <button id="btn-grid-reset-auto" class="btn btn-danger-outline btn-sm" title="Remove auto-generated slots for this section (keeps Self-Assigned)">Reset Auto Timetable</button>
               </div>
               <div class="legend">
                 <span class="badge badge-manual">Self-Assigned</span>
@@ -338,6 +341,7 @@
               <option value="DATED">Dated</option>
             </select>
             <input id="filter-search" type="search" placeholder="Search subject, faculty, reason..." />
+            <button type="button" id="btn-master-reset-auto" class="btn btn-danger-outline btn-sm" title="Remove all auto-generated slots across all courses">Reset All Auto-Generated</button>
           </div>
         </div>
         <div class="table-scroll">

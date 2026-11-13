@@ -363,6 +363,26 @@ def run_tests():
         assert any(e["subject_id"] == bba_sub["id"] for e in sp["entries"])
         assert any(c["custom_title"] == "Coding Club" for c in sp["clubs"])
 
+        # 9. Automate & Reset Auto-Generated Timetable (preserving Manual slots)
+        auto_res = client.post(
+            "/api/v1/timetable/automate",
+            json={"section_ids": [bba_m1["id"]], "weekdays": ["Monday", "Tuesday"]},
+        )
+        assert auto_res.status_code == 200, auto_res.get_json()
+        created_auto = auto_res.get_json()["created_count"]
+        assert created_auto > 0
+
+        reset_res = client.post(
+            "/api/v1/timetable/clear",
+            json={"section_ids": [bba_m1["id"]], "mode": "AUTO"},
+        )
+        assert reset_res.status_code == 200, reset_res.get_json()
+        assert reset_res.get_json()["deleted_count"] == created_auto
+
+        remaining_bba = client.get(f"/api/v1/timetable?section_id={bba_m1['id']}").get_json()["entries"]
+        assert all(e["assignment_mode"] == "MANUAL" for e in remaining_bba)
+        assert len(remaining_bba) >= 2  # Manual slots remain untouched
+
         print("ALL STUDENT SYSTEM CLAUSES & LIFETIME/DATED TESTS PASSED!")
 
 

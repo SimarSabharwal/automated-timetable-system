@@ -289,24 +289,37 @@ def reallocate_slot(entry_id: int):
 def clear_timetable():
     data = request.get_json(force=True) or {}
     section_id = data.get("section_id")
-    mode = data.get("mode", "ALL")
+    section_ids = [int(x) for x in (data.get("section_ids") or [])]
+    mode = (data.get("mode") or "ALL").upper()
     conn = get_connection()
     try:
-        if section_id:
+        if section_ids:
+            placeholders = ",".join("?" for _ in section_ids)
             if mode == "AUTO":
-                conn.execute(
+                cur = conn.execute(
+                    f"DELETE FROM timetable_entries WHERE section_id IN ({placeholders}) AND assignment_mode = 'AUTO'",
+                    tuple(section_ids),
+                )
+            else:
+                cur = conn.execute(
+                    f"DELETE FROM timetable_entries WHERE section_id IN ({placeholders})",
+                    tuple(section_ids),
+                )
+        elif section_id:
+            if mode == "AUTO":
+                cur = conn.execute(
                     "DELETE FROM timetable_entries WHERE section_id = ? AND assignment_mode = 'AUTO'",
                     (int(section_id),),
                 )
             else:
-                conn.execute("DELETE FROM timetable_entries WHERE section_id = ?", (int(section_id),))
+                cur = conn.execute("DELETE FROM timetable_entries WHERE section_id = ?", (int(section_id),))
         else:
             if mode == "AUTO":
-                conn.execute("DELETE FROM timetable_entries WHERE assignment_mode = 'AUTO'")
+                cur = conn.execute("DELETE FROM timetable_entries WHERE assignment_mode = 'AUTO'")
             else:
-                conn.execute("DELETE FROM timetable_entries")
+                cur = conn.execute("DELETE FROM timetable_entries")
         conn.commit()
-        return jsonify({"ok": True})
+        return jsonify({"ok": True, "deleted_count": cur.rowcount})
     finally:
         conn.close()
 
